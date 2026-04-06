@@ -497,6 +497,46 @@ async def search_files(
     return "\n".join(matches)
 
 
+_MEDIA_MIME_TYPES: dict[str, str] = {
+    ".png":  "image/png",
+    ".jpg":  "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".gif":  "image/gif",
+    ".webp": "image/webp",
+    ".bmp":  "image/bmp",
+    ".svg":  "image/svg+xml",
+    ".mp3":  "audio/mpeg",
+    ".wav":  "audio/wav",
+    ".ogg":  "audio/ogg",
+    ".flac": "audio/flac",
+}
+
+
+async def read_media_file(
+    path: str,
+    allowed: Sequence[Path],
+) -> tuple[str, str, bytes]:
+    """
+    Read a media file and return (content_type, mime_type, data).
+
+    content_type is 'image', 'audio', or 'blob' — mirrors the TS server's
+    content-type selection logic.  data is the raw file bytes; callers are
+    responsible for base64-encoding if needed.
+    """
+    valid = await validate_path(path, allowed)
+    mime_type = _MEDIA_MIME_TYPES.get(valid.suffix.lower(), "application/octet-stream")
+
+    if mime_type.startswith("image/"):
+        content_type = "image"
+    elif mime_type.startswith("audio/"):
+        content_type = "audio"
+    else:
+        content_type = "blob"
+
+    _check_size(valid)
+    return content_type, mime_type, valid.read_bytes()
+
+
 async def get_file_info(path: str, allowed: Sequence[Path]) -> str:
     """
     Return file/directory metadata as key-value text.

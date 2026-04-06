@@ -17,10 +17,12 @@ Python-only additions vs the TS server:
 
 from __future__ import annotations
 
+import base64
 import sys
 from typing import Optional
 
 from fastmcp import FastMCP
+from fastmcp.utilities.types import Audio, Image
 from pydantic import BaseModel, Field
 
 from mcp_filesystem.operations import (
@@ -31,6 +33,7 @@ from mcp_filesystem.operations import (
     list_directory,
     list_directory_with_sizes,
     move_file,
+    read_media_file,
     read_multiple_files,
     read_text_file,
     search_files,
@@ -97,6 +100,27 @@ def create_server(allowed_dirs: list[str]) -> FastMCP:
         tail: Optional[int] = None,
     ) -> str:
         return await read_text_file(path, allowed, head=head, tail=tail)
+
+    # -----------------------------------------------------------------------
+    # read_media_file
+    # -----------------------------------------------------------------------
+
+    @mcp.tool(
+        name="read_media_file",
+        description=(
+            "Read an image or audio file. Returns the base64 encoded data and "
+            "MIME type. Only works within allowed directories."
+        ),
+    )
+    async def _read_media_file(path: str):
+        content_type, mime_type, data = await read_media_file(path, allowed)
+        if content_type == "image":
+            return Image(data=data, format=mime_type.split("/", 1)[1])
+        elif content_type == "audio":
+            return Audio(data=data, format=mime_type.split("/", 1)[1])
+        else:
+            b64 = base64.b64encode(data).decode("ascii")
+            return f"type: blob\nmimeType: {mime_type}\ndata: {b64}"
 
     # -----------------------------------------------------------------------
     # read_multiple_files

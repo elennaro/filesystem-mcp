@@ -27,6 +27,7 @@ from mcp_filesystem.operations import (
     list_directory,
     list_directory_with_sizes,
     move_file,
+    read_media_file,
     read_multiple_files,
     read_text_file,
     search_files,
@@ -619,3 +620,81 @@ class TestGetFileInfo:
         ts_pattern = r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z"
         modified_line = next(l for l in result.splitlines() if l.startswith("modified:"))
         assert re.search(ts_pattern, modified_line)
+
+
+# ---------------------------------------------------------------------------
+# read_media_file
+# ---------------------------------------------------------------------------
+
+class TestReadMediaFile:
+    def test_image_content_type_and_mime(self, tmpdir):
+        p = tmpdir / "photo.png"
+        p.write_bytes(b"\x89PNG\r\n\x1a\n" + b"\x00" * 16)
+        allowed = resolve_allowed_directories([str(tmpdir)])
+        ct, mime, data = run(read_media_file(str(p), allowed))
+        assert ct == "image"
+        assert mime == "image/png"
+        assert data == b"\x89PNG\r\n\x1a\n" + b"\x00" * 16
+
+    def test_jpeg_extension(self, tmpdir):
+        p = tmpdir / "photo.jpg"
+        p.write_bytes(b"\xff\xd8\xff")
+        allowed = resolve_allowed_directories([str(tmpdir)])
+        ct, mime, _ = run(read_media_file(str(p), allowed))
+        assert ct == "image"
+        assert mime == "image/jpeg"
+
+    def test_jpeg_long_extension(self, tmpdir):
+        p = tmpdir / "photo.jpeg"
+        p.write_bytes(b"\xff\xd8\xff")
+        allowed = resolve_allowed_directories([str(tmpdir)])
+        _, mime, _ = run(read_media_file(str(p), allowed))
+        assert mime == "image/jpeg"
+
+    def test_svg_mime(self, tmpdir):
+        p = tmpdir / "icon.svg"
+        p.write_bytes(b"<svg/>")
+        allowed = resolve_allowed_directories([str(tmpdir)])
+        ct, mime, _ = run(read_media_file(str(p), allowed))
+        assert ct == "image"
+        assert mime == "image/svg+xml"
+
+    def test_audio_mp3(self, tmpdir):
+        p = tmpdir / "track.mp3"
+        p.write_bytes(b"\xff\xfb" + b"\x00" * 16)
+        allowed = resolve_allowed_directories([str(tmpdir)])
+        ct, mime, _ = run(read_media_file(str(p), allowed))
+        assert ct == "audio"
+        assert mime == "audio/mpeg"
+
+    def test_audio_wav(self, tmpdir):
+        p = tmpdir / "sound.wav"
+        p.write_bytes(b"RIFF" + b"\x00" * 36)
+        allowed = resolve_allowed_directories([str(tmpdir)])
+        ct, mime, _ = run(read_media_file(str(p), allowed))
+        assert ct == "audio"
+        assert mime == "audio/wav"
+
+    def test_blob_for_unknown_extension(self, tmpdir):
+        p = tmpdir / "data.bin"
+        p.write_bytes(b"\x00\x01\x02")
+        allowed = resolve_allowed_directories([str(tmpdir)])
+        ct, mime, _ = run(read_media_file(str(p), allowed))
+        assert ct == "blob"
+        assert mime == "application/octet-stream"
+
+    def test_data_roundtrip(self, tmpdir):
+        payload = b"\xde\xad\xbe\xef" * 8
+        p = tmpdir / "img.gif"
+        p.write_bytes(payload)
+        allowed = resolve_allowed_directories([str(tmpdir)])
+        _, _, data = run(read_media_file(str(p), allowed))
+        assert data == payload
+
+    def test_path_outside_allowed_rejected(self, tmpdir):
+        other = make_tmp()
+        p = other / "img.png"
+        p.write_bytes(b"")
+        allowed = resolve_allowed_directories([str(tmpdir)])
+        with pytest.raises(PermissionError, match="Access denied"):
+            run(read_media_file(str(p), allowed))
