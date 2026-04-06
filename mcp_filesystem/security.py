@@ -11,9 +11,17 @@ Key behaviours that match the TS server exactly:
 - Allowed directories resolved to real paths at startup (both original + realpath stored)
 
 Python-only additions (not in TS server):
-- Handles "F/work/..." bare-drive-letter paths (GLM model quirk)
+- Handles "F/work/..." bare-drive-letter paths (GLM model quirk) — only when
+  the leading single letter is NOT a real directory in the current working directory
 - Null-byte rejection in paths
 - File size limit check (enforced by callers, not here)
+
+INTENTIONALLY NOT IMPLEMENTED (security policy):
+- No recursive directory deletion (shutil.rmtree or equivalent) anywhere in
+  server code. The MCP tools exposed to models do not include any delete
+  operation. This matches the TS reference server which also has no delete tools.
+  Callers that request deletion will receive a PermissionError or a tool-not-found
+  response — never silent data loss.
 """
 
 from __future__ import annotations
@@ -37,11 +45,25 @@ def normalize_path(path_str: str) -> Path:
       phase 1: is the path string within allowed dirs?  (normalize_path result)
       phase 2: is the symlink TARGET within allowed dirs? (Path.resolve() result)
 
-    Handles all four formats that AI models produce on Windows:
+    Handles four formats that AI models produce on Windows:
       - Standard:       F:/work/file.py  or  F:\\work\\file.py
       - GLM Unix-style: /F/work/file.py    (drive letter in first component)
-      - Bare drive:     F/work/file.py     (missing colon — GLM quirk)
+      - Bare drive:     F/work/file.py     (missing colon — GLM quirk, see below)
       - Tilde:          ~/file.py          (home dir expansion)
+
+    SECURITY NOTE — bare drive normalization (F/work/...):
+    This is ambiguous on Windows: "F/work/file.py" could mean:
+      (a) a relative path, i.e. cwd/F/work/file.py, if a directory named "F" exists
+      (b) a GLM-generated shorthand for the Windows path F:/work/file.py
+
+    We resolve the ambiguity by checking the filesystem: if a directory named
+    "F" (the single letter) exists in the current working directory, we treat the
+    path as relative (interpretation a). Only if it does NOT exist do we apply
+    the drive-letter rewrite (interpretation b).
+
+    The allowed-directory check in validate_path is the final security gate —
+    any path that reaches the server, whether normalized or not, is rejected
+    unless it falls within an explicitly configured allowed directory.
 
     Returns an absolute Path (symlinks not yet resolved).
     """
@@ -49,13 +71,20 @@ def normalize_path(path_str: str) -> Path:
 
     if os.name == "nt":
         # /F/work/... → F:/work/...  (matches TS convertToWindowsPath for /c/ paths)
+        # This is unambiguous: an absolute Unix-style path starting with /LETTER/
+        # cannot be a real path in the server's CWD on Windows.
         p = re.sub(
             r"^/([A-Za-z])(/|$)",
             lambda m: m.group(1).upper() + ":/" + (m.group(2) if m.group(2) else ""),
             p,
         )
-        # F/work/... → F:/work/...  (bare drive letter without colon — not in TS)
-        p = re.sub(r"^([A-Za-z])/", lambda m: m.group(1).upper() + ":/", p)
+        # F/work/... → F:/work/...  ONLY if "F" is not a real directory in CWD.
+        # If cwd/F/ exists, leave the path as-is (it's a legitimate relative path).
+        bare_match = re.match(r"^([A-Za-z])/", p)
+        if bare_match:
+            letter = bare_match.group(1)
+            if not (Path.cwd() / letter).is_dir():
+                p = letter.upper() + ":/" + p[2:]
 
     path = Path(p).expanduser()
     if not path.is_absolute():

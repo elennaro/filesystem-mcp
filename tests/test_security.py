@@ -96,12 +96,41 @@ class TestNormalizePath:
         assert "work" in str(result)
 
     @pytest.mark.skipif(os.name != "nt", reason="Windows-only path format")
-    def test_bare_drive_letter(self):
+    def test_bare_drive_letter_no_real_dir(self):
         """
-        F/work/foo.py → F:/work/foo.py  (missing colon — GLM quirk not in TS server)
+        F/work/foo.py → F:/work/foo.py  when no directory named 'F' exists in CWD.
+        This is the GLM quirk path — only applied when 'F' is not a real CWD subdir.
         """
+        # Ensure no directory named 'F' exists in CWD before testing
+        if (Path.cwd() / "F").is_dir():
+            pytest.skip("A directory named 'F' exists in CWD — ambiguous, skip")
         result = normalize_path("F/work/foo.py")
         assert str(result).startswith("F:") or str(result).startswith("f:")
+
+    @pytest.mark.skipif(os.name != "nt", reason="Windows-only path format")
+    def test_bare_drive_letter_real_dir_not_normalized(self, tmpdir):
+        """
+        SECURITY: If a directory named 'X' actually exists in CWD, then
+        X/work/foo.py must NOT be rewritten to X:/work/foo.py — it must be
+        treated as a relative path (cwd/X/work/foo.py).
+        """
+        # Create a single-letter subdirectory in tmpdir and cd into it
+        single_letter_dir = tmpdir / "X"
+        single_letter_dir.mkdir()
+        original_cwd = Path.cwd()
+        os.chdir(tmpdir)
+        try:
+            result = normalize_path("X/work/foo.py")
+            # Must NOT start with 'X:' — must be relative to tmpdir
+            assert not (str(result).startswith("X:") or str(result).startswith("x:")), (
+                f"normalize_path incorrectly rewrote X/work/foo.py to {result} "
+                "even though directory X/ exists in CWD"
+            )
+            # Must be absolute and resolve under tmpdir
+            assert result.is_absolute()
+            assert str(result).lower().startswith(str(tmpdir).lower())
+        finally:
+            os.chdir(original_cwd)
 
     def test_tilde_expansion(self):
         result = normalize_path("~/testfile.txt")
