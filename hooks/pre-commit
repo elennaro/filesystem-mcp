@@ -1,22 +1,38 @@
 #!/bin/sh
 # Pre-commit hook — privacy guard
 # Install with: make setup-hooks
+#
+# If python is not on your PATH, set PYTHON_CMD in your shell profile:
+#   export PYTHON_CMD="/c/path/to/python.exe"
+# or add uv to PATH:
+#   export PATH="$HOME/.local/bin:$PATH"
 
 REPO_ROOT="$(git rev-parse --show-toplevel)"
+SCRIPT="$REPO_ROOT/hooks/check_privacy.py"
 
-# Find Python — try common names in order
-PYTHON=""
+# Resolve Python — check explicit override, then PATH, then uv
+if [ -n "$PYTHON_CMD" ]; then
+    "$PYTHON_CMD" "$SCRIPT"
+    exit $?
+fi
+
 for candidate in python3 python py; do
     if command -v "$candidate" > /dev/null 2>&1; then
-        PYTHON="$candidate"
-        break
+        "$candidate" "$SCRIPT"
+        exit $?
     fi
 done
 
-if [ -z "$PYTHON" ]; then
-    echo "pre-commit hook: python not found in PATH — skipping privacy check"
-    echo "Install Python and ensure it is on PATH, then re-run: make setup-hooks"
-    exit 0
-fi
+# Last resort: uv (check PATH and common install locations)
+for uv in uv "$HOME/.local/bin/uv" "$HOME/.local/bin/uv.exe"; do
+    if command -v "$uv" > /dev/null 2>&1 || [ -x "$uv" ]; then
+        "$uv" run python "$SCRIPT"
+        exit $?
+    fi
+done
 
-"$PYTHON" "$REPO_ROOT/hooks/check_privacy.py"
+echo "pre-commit hook: python not found."
+echo "Fix: add Python or uv to PATH, or set PYTHON_CMD=/path/to/python.exe"
+echo "Alternatively run manually: make check-privacy"
+echo "Skipping — WARNING: privacy check did not run."
+exit 0

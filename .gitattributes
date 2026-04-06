@@ -1,0 +1,9 @@
+# Always LF for shell scripts — CRLF breaks sh/bash on any platform
+hooks/pre-commit text eol=lf
+hooks/*.sh       text eol=lf
+*.py             text eol=lf
+Makefile         text eol=lf
+
+# Windows-native files can use CRLF
+*.md             text eol=crlf
+*.txt            text eol=crlf
