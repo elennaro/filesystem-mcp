@@ -8,7 +8,8 @@ Tests are independent of LM Studio and any model.
 
 import asyncio
 import os
-import sys
+import shutil
+import subprocess
 import tempfile
 from pathlib import Path
 
@@ -35,8 +36,33 @@ def tmpdir():
     """A real temporary directory; cleaned up after each test."""
     d = tempfile.mkdtemp()
     yield Path(d)
-    import shutil
     shutil.rmtree(d, ignore_errors=True)
+
+
+def _create_dir_link(link: Path, target: Path) -> bool:
+    """
+    Create a directory-level reparse point: link → target.
+
+    On Windows: directory junction via 'mklink /J' — requires NO elevated permissions.
+    On other platforms: plain directory symlink.
+
+    Directory junctions are followed by os.path.realpath() / Path.resolve() exactly
+    like symlinks, so they exercise the same security code path in validate_path.
+
+    Returns True if the link was created successfully.
+    """
+    if os.name == "nt":
+        result = subprocess.run(
+            ["cmd", "/c", "mklink", "/J", str(link), str(target)],
+            capture_output=True,
+        )
+        return result.returncode == 0
+    else:
+        try:
+            link.symlink_to(target, target_is_directory=True)
+            return True
+        except OSError:
+            return False
 
 
 # ---------------------------------------------------------------------------
@@ -232,7 +258,6 @@ class TestValidatePathRejections:
             with pytest.raises(PermissionError, match="Access denied - path outside allowed directories"):
                 run(validate_path(other, allowed))
         finally:
-            import shutil
             shutil.rmtree(other, ignore_errors=True)
 
     def test_dotdot_escape_attempt(self, tmpdir):
@@ -253,42 +278,57 @@ class TestValidatePathRejections:
         with pytest.raises(FileNotFoundError, match="Parent directory does not exist"):
             run(validate_path(deep, allowed))
 
-    @pytest.mark.skipif(
-        os.name == "nt" and sys.version_info < (3, 8),
-        reason="symlink creation may require elevated perms on older Windows",
-    )
-    def test_symlink_outside_allowed_rejected(self, tmpdir):
-        """A symlink inside allowed that points outside must be rejected."""
+    def test_escape_via_junction_rejected(self, tmpdir):
+        """
+        A directory junction/symlink inside allowed that points OUTSIDE must be rejected.
+
+        Attack scenario: model creates allowed/escape/ → /sensitive/dir/, then
+        reads allowed/escape/secret.txt. validate_path must follow the junction
+        (via Path.resolve) and reject because the real path is outside allowed dirs.
+
+        Uses directory junctions on Windows (no elevated perms needed),
+        directory symlinks on other platforms.
+        """
         outside = tempfile.mkdtemp()
         try:
-            target_file = Path(outside) / "secret.txt"
-            target_file.write_text("secret")
+            secret = Path(outside) / "secret.txt"
+            secret.write_text("secret")
 
-            link = tmpdir / "evil_link.txt"
-            try:
-                link.symlink_to(target_file)
-            except (OSError, NotImplementedError):
-                pytest.skip("Cannot create symlinks on this platform/configuration")
+            junction = tmpdir / "escape"
+            if not _create_dir_link(junction, Path(outside)):
+                pytest.fail(
+                    "Could not create directory junction — required for security test. "
+                    "On Windows, ensure 'cmd' is available."
+                )
 
             allowed = resolve_allowed_directories([str(tmpdir)])
+            # Access a file through the junction — must be rejected
             with pytest.raises(PermissionError, match="symlink target outside allowed directories"):
-                run(validate_path(str(link), allowed))
+                run(validate_path(str(junction / "secret.txt"), allowed))
         finally:
-            import shutil
             shutil.rmtree(outside, ignore_errors=True)
 
-    def test_symlink_inside_allowed_accepted(self, tmpdir):
-        """A symlink inside allowed that also points inside must be accepted."""
-        target = tmpdir / "real.txt"
-        target.write_text("real content")
-        link = tmpdir / "link.txt"
-        try:
-            link.symlink_to(target)
-        except (OSError, NotImplementedError):
-            pytest.skip("Cannot create symlinks on this platform/configuration")
+    def test_junction_inside_allowed_accepted(self, tmpdir):
+        """
+        A directory junction/symlink inside allowed that points to ANOTHER location
+        inside allowed must be accepted.
+
+        Uses directory junctions on Windows (no elevated perms needed),
+        directory symlinks on other platforms.
+        """
+        real_subdir = tmpdir / "real_subdir"
+        real_subdir.mkdir()
+        target_file = real_subdir / "file.txt"
+        target_file.write_text("content")
+
+        junction = tmpdir / "link_subdir"
+        if not _create_dir_link(junction, real_subdir):
+            pytest.fail(
+                "Could not create directory junction — required for security test."
+            )
 
         allowed = resolve_allowed_directories([str(tmpdir)])
-        result = run(validate_path(str(link), allowed))
+        result = run(validate_path(str(junction / "file.txt"), allowed))
         assert result.is_absolute()
 
 
@@ -309,27 +349,24 @@ class TestValidatePathErrorMessages:
             assert "Access denied - path outside allowed directories:" in msg
             assert " not in " in msg
         finally:
-            import shutil
             shutil.rmtree(other, ignore_errors=True)
 
-    def test_symlink_message_format(self, tmpdir):
+    def test_escape_message_format(self, tmpdir):
+        """Error message for junction/symlink escape must match TS server string exactly."""
         outside = tempfile.mkdtemp()
         try:
-            target_file = Path(outside) / "s.txt"
-            target_file.write_text("x")
-            link = tmpdir / "link.txt"
-            try:
-                link.symlink_to(target_file)
-            except (OSError, NotImplementedError):
-                pytest.skip("Cannot create symlinks")
+            (Path(outside) / "s.txt").write_text("x")
+            junction = tmpdir / "escape"
+            if not _create_dir_link(junction, Path(outside)):
+                pytest.fail("Could not create directory junction — required for this test.")
 
             allowed = resolve_allowed_directories([str(tmpdir)])
             with pytest.raises(PermissionError) as exc_info:
-                run(validate_path(str(link), allowed))
+                run(validate_path(str(junction / "s.txt"), allowed))
             msg = str(exc_info.value)
             assert "Access denied - symlink target outside allowed directories:" in msg
+            assert " not in " in msg
         finally:
-            import shutil
             shutil.rmtree(outside, ignore_errors=True)
 
     def test_parent_not_exist_message_format(self, tmpdir):

@@ -27,7 +27,15 @@ from typing import Sequence
 
 def normalize_path(path_str: str) -> Path:
     """
-    Normalize a path string to an absolute pathlib.Path.
+    Normalize a path string to an absolute pathlib.Path WITHOUT following symlinks.
+
+    Makes the path absolute and resolves . and .. components, but deliberately
+    does NOT follow symlinks or directory junctions. Symlink resolution is
+    deferred to validate_path (via Path.resolve(strict=True)) so that junctions
+    pointing outside allowed directories are caught at the correct step with the
+    correct error message — matching the TS server's two-phase check:
+      phase 1: is the path string within allowed dirs?  (normalize_path result)
+      phase 2: is the symlink TARGET within allowed dirs? (Path.resolve() result)
 
     Handles all four formats that AI models produce on Windows:
       - Standard:       F:/work/file.py  or  F:\\work\\file.py
@@ -35,10 +43,7 @@ def normalize_path(path_str: str) -> Path:
       - Bare drive:     F/work/file.py     (missing colon — GLM quirk)
       - Tilde:          ~/file.py          (home dir expansion)
 
-    On non-Windows platforms the path is passed through with only tilde
-    expansion and normalization applied.
-
-    Returns an absolute Path (not yet resolved — symlinks still present).
+    Returns an absolute Path (symlinks not yet resolved).
     """
     p = path_str.strip().strip("\"'")
 
@@ -52,7 +57,11 @@ def normalize_path(path_str: str) -> Path:
         # F/work/... → F:/work/...  (bare drive letter without colon — not in TS)
         p = re.sub(r"^([A-Za-z])/", lambda m: m.group(1).upper() + ":/", p)
 
-    return Path(p).expanduser().resolve()
+    path = Path(p).expanduser()
+    if not path.is_absolute():
+        path = Path.cwd() / path
+    # os.path.normpath resolves . and .. without following symlinks or junctions
+    return Path(os.path.normpath(path))
 
 
 def _normalize_for_comparison(path: Path) -> str:
