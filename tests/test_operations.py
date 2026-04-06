@@ -191,6 +191,28 @@ class TestReadTextFile:
         with pytest.raises(ValueError, match="Cannot specify both head and tail"):
             run(read_text_file(str(f), allowed, head=1, tail=1))
 
+    def test_head_stops_early_does_not_read_whole_file(self, tmpdir):
+        # 1000 lines; head=3 must return exactly the first 3 regardless of file length
+        f = tmpdir / "big.txt"
+        f.write_text("\n".join(str(i) for i in range(1000)))
+        allowed = resolve_allowed_directories([str(tmpdir)])
+        result = run(read_text_file(str(f), allowed, head=3))
+        assert result == "0\n1\n2"
+
+    def test_head_crlf_normalized(self, tmpdir):
+        f = tmpdir / "crlf.txt"
+        f.write_bytes(b"a\r\nb\r\nc\r\n")
+        allowed = resolve_allowed_directories([str(tmpdir)])
+        result = run(read_text_file(str(f), allowed, head=2))
+        assert result == "a\nb"
+
+    def test_head_larger_than_file(self, tmpdir):
+        f = tmpdir / "small.txt"
+        f.write_text("x\ny\n")
+        allowed = resolve_allowed_directories([str(tmpdir)])
+        result = run(read_text_file(str(f), allowed, head=100))
+        assert result == "x\ny"
+
     def test_path_outside_allowed_rejected(self, tmpdir):
         other = make_tmp()
         try:
@@ -572,6 +594,28 @@ class TestSearchFiles:
         ))
         assert "keep.txt" in result
         assert "pkg.txt" not in result
+
+    def test_excluded_dir_itself_not_in_results(self, tmpdir):
+        # Excluded dir should not appear even when pattern would match it
+        sub = tmpdir / "dist"
+        sub.mkdir()
+        (sub / "out.js").write_text("x")
+        allowed = resolve_allowed_directories([str(tmpdir)])
+        result = run(search_files(
+            str(tmpdir), "**/*", allowed,
+            exclude_patterns=["dist"],
+        ))
+        assert "dist" not in result.split("\n")[0] if result != "No matches found" else True
+        assert "out.js" not in result
+
+    def test_non_excluded_dir_matches_pattern(self, tmpdir):
+        # Dirs that are NOT excluded should still appear in results when matched
+        sub = tmpdir / "src"
+        sub.mkdir()
+        (sub / "main.py").write_text("x")
+        allowed = resolve_allowed_directories([str(tmpdir)])
+        result = run(search_files(str(tmpdir), "src", allowed))
+        assert "src" in result
 
     def test_star_does_not_cross_slash(self, tmpdir):
         sub = tmpdir / "sub"

@@ -281,7 +281,6 @@ async def validate_path_for_creation(
         ancestor = ancestor.parent
 
     if not ancestor.exists():
-        dirs_str = ", ".join(str(d) for d in allowed_directories)
         raise FileNotFoundError(
             f"No accessible ancestor directory found for: {absolute}"
         )

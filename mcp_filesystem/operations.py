@@ -34,6 +34,8 @@ from mcp_filesystem.security import validate_path, validate_path_for_creation
 
 MAX_FILE_SIZE = 50 * 1024 * 1024  # 50 MB
 
+_BACKTICK_RE = re.compile(r"`+")
+
 
 # ---------------------------------------------------------------------------
 # Internal helpers
@@ -150,7 +152,7 @@ def _make_diff(original: str, modified: str, path: Path) -> str:
     )
     diff_str = "".join(diff_lines)
     max_seq = max(
-        (len(m.group()) for m in re.finditer(r"`+", diff_str)),
+        (len(m.group()) for m in _BACKTICK_RE.finditer(diff_str)),
         default=2,
     )
     fence = "`" * max(3, max_seq + 1)
@@ -251,9 +253,16 @@ async def read_text_file(
         )
     valid = await validate_path(path, allowed)
     _check_size(valid)
-    text = valid.read_text(encoding="utf-8", errors="replace")
     if head is not None:
-        return "\n".join(text.splitlines()[:head])
+        # Early-stop: read only until N lines collected — O(head) not O(file).
+        lines: list[str] = []
+        with valid.open(encoding="utf-8", errors="replace") as f:
+            for line in f:
+                lines.append(line.rstrip("\r\n"))
+                if len(lines) >= head:
+                    break
+        return "\n".join(lines)
+    text = valid.read_text(encoding="utf-8", errors="replace")
     if tail is not None:
         return "\n".join(text.splitlines()[-tail:])
     return text
@@ -483,8 +492,15 @@ async def search_files(
             )
         ]
 
-        all_names = [(n, True) for n in dirnames] + [(n, False) for n in filenames]
-        for name, _ in all_names:
+        # Dirs are already exclude-pruned above; only check glob match.
+        for name in dirnames:
+            entry = current / name
+            rel = str(entry.relative_to(valid)).replace("\\", "/")
+            if _glob_match(rel, pattern):
+                matches.append(str(entry))
+
+        # Files were not pruned above; check both exclude and glob.
+        for name in filenames:
             entry = current / name
             rel = str(entry.relative_to(valid)).replace("\\", "/")
             if _matches_exclude(rel, exclude_patterns):
