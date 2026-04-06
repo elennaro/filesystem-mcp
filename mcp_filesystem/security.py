@@ -46,18 +46,18 @@ def normalize_path(path_str: str) -> Path:
       phase 2: is the symlink TARGET within allowed dirs? (Path.resolve() result)
 
     Handles four formats that AI models produce on Windows:
-      - Standard:       F:/work/file.py  or  F:\\work\\file.py
-      - GLM Unix-style: /F/work/file.py    (drive letter in first component)
-      - Bare drive:     F/work/file.py     (missing colon — GLM quirk, see below)
-      - Tilde:          ~/file.py          (home dir expansion)
+      - Standard:       C:/projects/file.py  or  C:\\projects\\file.py
+      - GLM Unix-style: /C/projects/file.py    (drive letter in first component)
+      - Bare drive:     C/projects/file.py     (missing colon — GLM quirk, see below)
+      - Tilde:          ~/file.py              (home dir expansion)
 
-    SECURITY NOTE — bare drive normalization (F/work/...):
-    This is ambiguous on Windows: "F/work/file.py" could mean:
-      (a) a relative path, i.e. cwd/F/work/file.py, if a directory named "F" exists
-      (b) a GLM-generated shorthand for the Windows path F:/work/file.py
+    SECURITY NOTE — bare drive normalization (LETTER/path/...):
+    This is ambiguous on Windows: "C/projects/file.py" could mean:
+      (a) a relative path, i.e. cwd/C/projects/file.py, if a directory named "C" exists
+      (b) a GLM-generated shorthand for the Windows path C:/projects/file.py
 
     We resolve the ambiguity by checking the filesystem: if a directory named
-    "F" (the single letter) exists in the current working directory, we treat the
+    "C" (the single letter) exists in the current working directory, we treat the
     path as relative (interpretation a). Only if it does NOT exist do we apply
     the drive-letter rewrite (interpretation b).
 
@@ -70,7 +70,7 @@ def normalize_path(path_str: str) -> Path:
     p = path_str.strip().strip("\"'")
 
     if os.name == "nt":
-        # /F/work/... → F:/work/...  (matches TS convertToWindowsPath for /c/ paths)
+        # /C/projects/... → C:/projects/...  (matches TS convertToWindowsPath for /c/ paths)
         # This is unambiguous: an absolute Unix-style path starting with /LETTER/
         # cannot be a real path in the server's CWD on Windows.
         p = re.sub(
@@ -78,8 +78,8 @@ def normalize_path(path_str: str) -> Path:
             lambda m: m.group(1).upper() + ":/" + (m.group(2) if m.group(2) else ""),
             p,
         )
-        # F/work/... → F:/work/...  ONLY if "F" is not a real directory in CWD.
-        # If cwd/F/ exists, leave the path as-is (it's a legitimate relative path).
+        # C/projects/... → C:/projects/...  ONLY if "C" is not a real directory in CWD.
+        # If cwd/C/ exists, leave the path as-is (it's a legitimate relative path).
         bare_match = re.match(r"^([A-Za-z])/", p)
         if bare_match:
             letter = bare_match.group(1)
