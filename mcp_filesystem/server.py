@@ -21,6 +21,7 @@ import sys
 from typing import Optional
 
 from fastmcp import FastMCP
+from pydantic import BaseModel, Field
 
 from mcp_filesystem.operations import (
     create_directory,
@@ -36,6 +37,11 @@ from mcp_filesystem.operations import (
     write_file,
 )
 from mcp_filesystem.security import resolve_allowed_directories
+
+
+class FileEdit(BaseModel):
+    oldText: str = Field(description="Text to search for - must match exactly")
+    newText: str = Field(description="Text to replace with")
 
 
 def create_server(allowed_dirs: list[str]) -> FastMCP:
@@ -139,10 +145,10 @@ def create_server(allowed_dirs: list[str]) -> FastMCP:
     )
     async def _edit_file(
         path: str,
-        edits: list[dict],
+        edits: list[FileEdit],
         dryRun: bool = False,
     ) -> str:
-        return await edit_file(path, edits, allowed, dry_run=dryRun)
+        return await edit_file(path, [e.model_dump() for e in edits], allowed, dry_run=dryRun)
 
     # -----------------------------------------------------------------------
     # create_directory
