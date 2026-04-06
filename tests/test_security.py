@@ -264,7 +264,7 @@ class TestValidatePathWindowsFormats:
 
     def test_bare_drive_letter(self, tmpdir):
         """
-        F/work/... format — must be accepted (GLM quirk, not in TS server).
+        F/work/... format — must be accepted when normalized path lands in allowed dir.
         """
         f = tmpdir / "t.txt"
         f.write_text("x")
@@ -273,6 +273,43 @@ class TestValidatePathWindowsFormats:
         bare_path = f"{drive}/{rest}/t.txt"
         result = run(validate_path(bare_path, allowed))
         assert result.name == "t.txt"
+
+    def test_bare_drive_outside_allowed_rejected(self, tmpdir):
+        """
+        SECURITY: F/forbiddendirnotinallowedlist/something.txt must be rejected
+        even after bare-drive normalization rewrites it to F:/forbidden/something.txt.
+
+        The normalization itself is not the security gate — validate_path step 2
+        (_is_within_allowed on the normalized absolute path) is. This test proves
+        that gate fires correctly for bare-drive-format paths.
+        """
+        allowed = resolve_allowed_directories([str(tmpdir)])
+        drive, _ = self._drive_and_rest(tmpdir)
+
+        # Only apply this test if drive/ does not exist as a real CWD subdir
+        # (otherwise the bare-drive rewrite is intentionally skipped)
+        if (Path.cwd() / drive).is_dir():
+            pytest.skip(f"Directory '{drive}/' exists in CWD — bare-drive rewrite skipped")
+
+        # Construct a bare-drive path pointing to a completely different directory
+        # on the same drive — NOT inside tmpdir (the only allowed dir)
+        forbidden_bare = f"{drive}/some_forbidden_xyz_dir_notinallowed/secret.txt"
+
+        with pytest.raises(PermissionError, match="Access denied - path outside allowed directories"):
+            run(validate_path(forbidden_bare, allowed))
+
+    def test_glm_unix_style_outside_allowed_rejected(self, tmpdir):
+        """
+        SECURITY: /F/forbiddendirnotinallowedlist/something.txt must be rejected
+        after GLM unix-style normalization rewrites it to F:/forbidden/something.txt.
+        """
+        allowed = resolve_allowed_directories([str(tmpdir)])
+        drive, _ = self._drive_and_rest(tmpdir)
+
+        forbidden_glm = f"/{drive}/some_forbidden_xyz_dir_notinallowed/secret.txt"
+
+        with pytest.raises(PermissionError, match="Access denied - path outside allowed directories"):
+            run(validate_path(forbidden_glm, allowed))
 
 
 # ---------------------------------------------------------------------------
