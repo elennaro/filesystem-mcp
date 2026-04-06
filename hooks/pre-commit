@@ -1,0 +1,22 @@
+#!/bin/sh
+# Pre-commit hook — privacy guard
+# Install with: make setup-hooks
+
+REPO_ROOT="$(git rev-parse --show-toplevel)"
+
+# Find Python — try common names in order
+PYTHON=""
+for candidate in python3 python py; do
+    if command -v "$candidate" > /dev/null 2>&1; then
+        PYTHON="$candidate"
+        break
+    fi
+done
+
+if [ -z "$PYTHON" ]; then
+    echo "pre-commit hook: python not found in PATH — skipping privacy check"
+    echo "Install Python and ensure it is on PATH, then re-run: make setup-hooks"
+    exit 0
+fi
+
+"$PYTHON" "$REPO_ROOT/hooks/check_privacy.py"

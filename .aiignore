@@ -1,0 +1,21 @@
+# Git internals
+.git/
+
+# Python bytecode and caches
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+
+# Virtual environments
+.venv/
+venv/
+
+# Build artifacts
+dist/
+build/
+*.egg-info/
+
+# Test output (generated, not source)
+test_results_*.txt
+*.log
