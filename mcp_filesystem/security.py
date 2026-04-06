@@ -243,3 +243,61 @@ async def validate_path(requested_path: str, allowed_directories: Sequence[Path]
                     f"Parent directory does not exist: {parent}"
                 ) from exc
         raise
+
+
+async def validate_path_for_creation(
+    requested_path: str, allowed_directories: Sequence[Path]
+) -> Path:
+    """
+    Validate a path for write_file / create_directory operations that auto-create
+    parent directories.
+
+    Unlike validate_path (which requires the immediate parent to exist), this
+    function walks up the ancestor chain to find the nearest existing directory
+    and validates THAT against allowed dirs.  The path itself need not exist, and
+    neither do any of its parents — as long as the nearest existing ancestor is
+    within allowed directories and is not a symlink pointing out of them.
+
+    Python-only deviation from the TS server (which throws "Parent directory does
+    not exist" in this situation; the TS server never auto-creates parents).
+
+    Returns the absolute (non-realpath) path — callers create it themselves.
+    """
+    if "\x00" in requested_path:
+        raise ValueError(f"Invalid path: null byte in {requested_path!r}")
+
+    absolute = normalize_path(requested_path)
+
+    # Pre-symlink allowed-dir check on the path string itself
+    if not _is_within_allowed(absolute, allowed_directories):
+        dirs_str = ", ".join(str(d) for d in allowed_directories)
+        raise PermissionError(
+            f"Access denied - path outside allowed directories: {absolute} not in {dirs_str}"
+        )
+
+    # Walk up to find the nearest existing ancestor
+    ancestor = absolute
+    while not ancestor.exists() and ancestor != ancestor.parent:
+        ancestor = ancestor.parent
+
+    if not ancestor.exists():
+        dirs_str = ", ".join(str(d) for d in allowed_directories)
+        raise FileNotFoundError(
+            f"No accessible ancestor directory found for: {absolute}"
+        )
+
+    # Resolve ancestor (follows any symlinks) and verify it is within allowed dirs
+    try:
+        real_ancestor = ancestor.resolve(strict=True)
+    except OSError as exc:
+        raise FileNotFoundError(
+            f"Cannot resolve ancestor directory: {ancestor}"
+        ) from exc
+
+    if not _is_within_allowed(real_ancestor, allowed_directories):
+        dirs_str = ", ".join(str(d) for d in allowed_directories)
+        raise PermissionError(
+            f"Access denied - path outside allowed directories: {absolute} not in {dirs_str}"
+        )
+
+    return absolute
