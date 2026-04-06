@@ -1,8 +1,11 @@
 """
 Tests for mcp_filesystem.security — path normalization, allowed-dir validation,
-symlink rejection, and validatePath error messages.
+junction/symlink rejection, and validatePath error messages.
 
-All tests use tempfile.mkdtemp() — no hardcoded paths, no machine-specific data.
+All temp directories are created inside tests/tmp/ within the project via the
+`tmpdir` fixture (conftest.py) or `make_tmp()`. No system temp directories,
+no hardcoded machine paths, no real user directories referenced anywhere.
+
 Tests are independent of LM Studio and any model.
 """
 
@@ -10,7 +13,6 @@ import asyncio
 import os
 import shutil
 import subprocess
-import tempfile
 from pathlib import Path
 
 import pytest
@@ -20,6 +22,7 @@ from mcp_filesystem.security import (
     resolve_allowed_directories,
     validate_path,
 )
+from tests.conftest import make_tmp
 
 
 # ---------------------------------------------------------------------------
@@ -27,16 +30,8 @@ from mcp_filesystem.security import (
 # ---------------------------------------------------------------------------
 
 def run(coro):
-    """Run an async coroutine in tests."""
+    """Run an async coroutine synchronously in tests."""
     return asyncio.run(coro)
-
-
-@pytest.fixture()
-def tmpdir():
-    """A real temporary directory; cleaned up after each test."""
-    d = tempfile.mkdtemp()
-    yield Path(d)
-    shutil.rmtree(d, ignore_errors=True)
 
 
 def _create_dir_link(link: Path, target: Path) -> bool:
@@ -46,8 +41,8 @@ def _create_dir_link(link: Path, target: Path) -> bool:
     On Windows: directory junction via 'mklink /J' — requires NO elevated permissions.
     On other platforms: plain directory symlink.
 
-    Directory junctions are followed by os.path.realpath() / Path.resolve() exactly
-    like symlinks, so they exercise the same security code path in validate_path.
+    Directory junctions are followed by Path.resolve() exactly like symlinks,
+    exercising the same security code path in validate_path.
 
     Returns True if the link was created successfully.
     """
@@ -66,7 +61,7 @@ def _create_dir_link(link: Path, target: Path) -> bool:
 
 
 # ---------------------------------------------------------------------------
-# normalize_path — all 4 formats
+# normalize_path — all 4 path formats
 # ---------------------------------------------------------------------------
 
 class TestNormalizePath:
@@ -88,45 +83,47 @@ class TestNormalizePath:
     @pytest.mark.skipif(os.name != "nt", reason="Windows-only path format")
     def test_glm_unix_style_drive(self):
         """
-        /F/work/foo.py → F:/work/foo.py  (GLM-generated format)
-        normalize_path must convert this before Path() interprets it as root-relative.
+        GLM model produces /DRIVE/path/file.py instead of DRIVE:/path/file.py.
+        normalize_path must rewrite this before Path() interprets the leading
+        slash as root-relative (which would land on the wrong drive entirely).
+        Uses drive letter Q — unlikely to be a real volume on any test machine.
         """
-        result = normalize_path("/F/work/foo.py")
-        assert str(result).startswith("F:") or str(result).startswith("f:")
-        assert "work" in str(result)
+        if (Path.cwd() / "Q").is_dir():
+            pytest.skip("Directory 'Q' exists in CWD — skip to avoid ambiguity")
+        result = normalize_path("/Q/testdata/sample.py")
+        assert str(result).upper().startswith("Q:")
+        assert "testdata" in str(result)
 
     @pytest.mark.skipif(os.name != "nt", reason="Windows-only path format")
     def test_bare_drive_letter_no_real_dir(self):
         """
-        F/work/foo.py → F:/work/foo.py  when no directory named 'F' exists in CWD.
-        This is the GLM quirk path — only applied when 'F' is not a real CWD subdir.
+        GLM model also produces DRIVE/path/file.py (missing colon).
+        normalize_path must rewrite this to DRIVE:/path/file.py — but ONLY
+        when the leading letter is not a real subdirectory in CWD.
+        Uses drive letter Q — unlikely to be a real volume on any test machine.
         """
-        # Ensure no directory named 'F' exists in CWD before testing
-        if (Path.cwd() / "F").is_dir():
-            pytest.skip("A directory named 'F' exists in CWD — ambiguous, skip")
-        result = normalize_path("F/work/foo.py")
-        assert str(result).startswith("F:") or str(result).startswith("f:")
+        if (Path.cwd() / "Q").is_dir():
+            pytest.skip("Directory 'Q' exists in CWD — bare-drive rewrite skipped")
+        result = normalize_path("Q/testdata/sample.py")
+        assert str(result).upper().startswith("Q:")
 
     @pytest.mark.skipif(os.name != "nt", reason="Windows-only path format")
     def test_bare_drive_letter_real_dir_not_normalized(self, tmpdir):
         """
-        SECURITY: If a directory named 'X' actually exists in CWD, then
-        X/work/foo.py must NOT be rewritten to X:/work/foo.py — it must be
-        treated as a relative path (cwd/X/work/foo.py).
+        SECURITY: if a directory named 'Q' actually exists in CWD, then
+        Q/testdata/sample.py must NOT be rewritten to Q:/testdata/sample.py.
+        It must be treated as a relative path (cwd/Q/testdata/sample.py).
         """
-        # Create a single-letter subdirectory in tmpdir and cd into it
-        single_letter_dir = tmpdir / "X"
+        single_letter_dir = tmpdir / "Q"
         single_letter_dir.mkdir()
         original_cwd = Path.cwd()
         os.chdir(tmpdir)
         try:
-            result = normalize_path("X/work/foo.py")
-            # Must NOT start with 'X:' — must be relative to tmpdir
-            assert not (str(result).startswith("X:") or str(result).startswith("x:")), (
-                f"normalize_path incorrectly rewrote X/work/foo.py to {result} "
-                "even though directory X/ exists in CWD"
+            result = normalize_path("Q/testdata/sample.py")
+            assert not str(result).upper().startswith("Q:"), (
+                f"normalize_path incorrectly rewrote Q/testdata/sample.py "
+                f"to {result} even though directory Q/ exists in CWD"
             )
-            # Must be absolute and resolve under tmpdir
             assert result.is_absolute()
             assert str(result).lower().startswith(str(tmpdir).lower())
         finally:
@@ -163,25 +160,20 @@ class TestResolveAllowedDirectories:
         result = resolve_allowed_directories([str(tmpdir)])
         assert any(str(tmpdir).lower() in str(d).lower() for d in result)
 
-    def test_skips_inaccessible(self, tmpdir, capsys):
+    def test_skips_inaccessible(self, tmpdir):
         fake = str(tmpdir / "nonexistent_xyz_12345")
-        # Should not crash; nonexistent dir gets stored (TS behavior: store normalized)
-        # but since it's not a directory, it gets filtered; no exit(1) since tmpdir is also valid
         result = resolve_allowed_directories([str(tmpdir), fake])
-        # tmpdir must be present
         assert any(str(tmpdir).lower() in str(d).lower() for d in result)
 
     def test_deduplicates_same_path(self, tmpdir):
         result = resolve_allowed_directories([str(tmpdir), str(tmpdir)])
         norms = [str(d).lower() for d in result]
-        # No duplicates
         assert len(norms) == len(set(norms))
 
     def test_file_path_excluded(self, tmpdir):
         """A file path must not appear in the resolved allowed dirs list."""
         f = tmpdir / "file.txt"
         f.write_text("x")
-        # Pass the file alongside a valid dir so sys.exit(1) is not triggered
         result = resolve_allowed_directories([str(f), str(tmpdir)])
         assert not any(str(f).lower() == str(d).lower() for d in result)
 
@@ -220,96 +212,91 @@ class TestValidatePathHappyPath:
 
 
 # ---------------------------------------------------------------------------
-# validate_path — path format variants (4 formats)
+# validate_path — path format variants (all 4 formats, derived from tmpdir)
 # ---------------------------------------------------------------------------
 
 @pytest.mark.skipif(os.name != "nt", reason="Windows-only path formats")
 class TestValidatePathWindowsFormats:
-    """All 4 path formats must be accepted for a file inside allowed dirs."""
+    """
+    All 4 path formats must work for files inside allowed dirs.
 
-    def _drive_and_rest(self, tmpdir: Path):
-        """Split tmpdir into drive letter and rest for format construction."""
+    Drive letter and path components are derived at runtime from tmpdir —
+    no real user directory names are hardcoded here.
+    """
+
+    def _split(self, tmpdir: Path):
+        """Return (drive_letter, rest_as_forward_slashes) from tmpdir."""
         s = str(tmpdir)
-        drive = s[0].upper()  # e.g. 'F'
-        rest = s[2:].replace("\\", "/")  # strip 'F:' prefix
+        drive = s[0].upper()
+        rest = s[2:].replace("\\", "/")  # strip 'X:' prefix
         return drive, rest
 
     def test_forward_slash_format(self, tmpdir):
         f = tmpdir / "t.txt"
         f.write_text("x")
         allowed = resolve_allowed_directories([str(tmpdir)])
-        p = str(f).replace("\\", "/")
-        result = run(validate_path(p, allowed))
+        result = run(validate_path(str(f).replace("\\", "/"), allowed))
         assert result.is_absolute()
 
     def test_backslash_format(self, tmpdir):
         f = tmpdir / "t.txt"
         f.write_text("x")
         allowed = resolve_allowed_directories([str(tmpdir)])
-        p = str(f).replace("/", "\\")
-        result = run(validate_path(p, allowed))
+        result = run(validate_path(str(f).replace("/", "\\"), allowed))
         assert result.is_absolute()
 
-    def test_glm_unix_style(self, tmpdir):
+    def test_glm_unix_style_inside_allowed(self, tmpdir):
         """
-        /F/work/... format — must be accepted without 'path outside allowed' error.
+        /DRIVE/path/... format — must be accepted when it resolves into allowed dir.
+        Drive letter is derived from tmpdir, not hardcoded.
         """
         f = tmpdir / "t.txt"
         f.write_text("x")
         allowed = resolve_allowed_directories([str(tmpdir)])
-        drive, rest = self._drive_and_rest(tmpdir)
-        glm_path = f"/{drive}/{rest}/t.txt"
-        result = run(validate_path(glm_path, allowed))
+        drive, rest = self._split(tmpdir)
+        result = run(validate_path(f"/{drive}/{rest}/t.txt", allowed))
         assert result.name == "t.txt"
 
-    def test_bare_drive_letter(self, tmpdir):
+    def test_bare_drive_inside_allowed(self, tmpdir):
         """
-        F/work/... format — must be accepted when normalized path lands in allowed dir.
+        DRIVE/path/... format (missing colon) — must be accepted when it resolves
+        into allowed dir and the drive letter is not a real CWD subdir.
+        Drive letter is derived from tmpdir, not hardcoded.
         """
         f = tmpdir / "t.txt"
         f.write_text("x")
         allowed = resolve_allowed_directories([str(tmpdir)])
-        drive, rest = self._drive_and_rest(tmpdir)
-        bare_path = f"{drive}/{rest}/t.txt"
-        result = run(validate_path(bare_path, allowed))
+        drive, rest = self._split(tmpdir)
+        if (Path.cwd() / drive).is_dir():
+            pytest.skip(f"Directory '{drive}/' exists in CWD — bare-drive rewrite skipped")
+        result = run(validate_path(f"{drive}/{rest}/t.txt", allowed))
         assert result.name == "t.txt"
 
     def test_bare_drive_outside_allowed_rejected(self, tmpdir):
         """
-        SECURITY: F/forbiddendirnotinallowedlist/something.txt must be rejected
-        even after bare-drive normalization rewrites it to F:/forbidden/something.txt.
-
-        The normalization itself is not the security gate — validate_path step 2
-        (_is_within_allowed on the normalized absolute path) is. This test proves
-        that gate fires correctly for bare-drive-format paths.
+        SECURITY: DRIVE/forbidden/file.txt — after bare-drive normalization rewrites
+        it to DRIVE:/forbidden/file.txt, the result must be checked against allowed
+        dirs and rejected if it does not fall inside them.
         """
         allowed = resolve_allowed_directories([str(tmpdir)])
-        drive, _ = self._drive_and_rest(tmpdir)
-
-        # Only apply this test if drive/ does not exist as a real CWD subdir
-        # (otherwise the bare-drive rewrite is intentionally skipped)
+        drive, _ = self._split(tmpdir)
         if (Path.cwd() / drive).is_dir():
             pytest.skip(f"Directory '{drive}/' exists in CWD — bare-drive rewrite skipped")
 
-        # Construct a bare-drive path pointing to a completely different directory
-        # on the same drive — NOT inside tmpdir (the only allowed dir)
-        forbidden_bare = f"{drive}/some_forbidden_xyz_dir_notinallowed/secret.txt"
-
         with pytest.raises(PermissionError, match="Access denied - path outside allowed directories"):
-            run(validate_path(forbidden_bare, allowed))
+            run(validate_path(f"{drive}/isolated_forbidden_xyz/secret.txt", allowed))
 
     def test_glm_unix_style_outside_allowed_rejected(self, tmpdir):
         """
-        SECURITY: /F/forbiddendirnotinallowedlist/something.txt must be rejected
-        after GLM unix-style normalization rewrites it to F:/forbidden/something.txt.
+        SECURITY: /DRIVE/forbidden/file.txt — after GLM unix-style normalization
+        rewrites it to DRIVE:/forbidden/file.txt, the result must be rejected if
+        it does not fall inside allowed dirs.
         """
         allowed = resolve_allowed_directories([str(tmpdir)])
-        drive, _ = self._drive_and_rest(tmpdir)
-
-        forbidden_glm = f"/{drive}/some_forbidden_xyz_dir_notinallowed/secret.txt"
+        drive, _ = self._split(tmpdir)
 
         with pytest.raises(PermissionError, match="Access denied - path outside allowed directories"):
-            run(validate_path(forbidden_glm, allowed))
+            run(validate_path(f"/{drive}/isolated_forbidden_xyz/secret.txt", allowed))
 
 
 # ---------------------------------------------------------------------------
@@ -318,18 +305,18 @@ class TestValidatePathWindowsFormats:
 
 class TestValidatePathRejections:
     def test_path_outside_allowed(self, tmpdir):
-        other = tempfile.mkdtemp()
+        other = make_tmp()
         try:
             allowed = resolve_allowed_directories([str(tmpdir)])
             with pytest.raises(PermissionError, match="Access denied - path outside allowed directories"):
-                run(validate_path(other, allowed))
+                run(validate_path(str(other), allowed))
         finally:
             shutil.rmtree(other, ignore_errors=True)
 
     def test_dotdot_escape_attempt(self, tmpdir):
-        """/../ traversal must be caught after normalization."""
+        """/../ traversal must be caught after . and .. normalization."""
         allowed = resolve_allowed_directories([str(tmpdir)])
-        escape = str(tmpdir) + "/../../etc/passwd"
+        escape = str(tmpdir) + "/../../isolated_etc/passwd"
         with pytest.raises(PermissionError, match="Access denied"):
             run(validate_path(escape, allowed))
 
@@ -340,35 +327,30 @@ class TestValidatePathRejections:
 
     def test_parent_does_not_exist(self, tmpdir):
         allowed = resolve_allowed_directories([str(tmpdir)])
-        deep = str(tmpdir) + "/nonexistent_parent_xyz/file.txt"
         with pytest.raises(FileNotFoundError, match="Parent directory does not exist"):
-            run(validate_path(deep, allowed))
+            run(validate_path(str(tmpdir / "nonexistent_parent_xyz" / "file.txt"), allowed))
 
     def test_escape_via_junction_rejected(self, tmpdir):
         """
-        A directory junction/symlink inside allowed that points OUTSIDE must be rejected.
+        A junction inside allowed pointing to a directory OUTSIDE allowed must
+        be rejected. validate_path follows the junction via Path.resolve() and
+        checks the real destination against allowed dirs.
 
-        Attack scenario: model creates allowed/escape/ → /sensitive/dir/, then
-        reads allowed/escape/secret.txt. validate_path must follow the junction
-        (via Path.resolve) and reject because the real path is outside allowed dirs.
-
-        Uses directory junctions on Windows (no elevated perms needed),
+        Uses directory junctions on Windows (no elevated permissions needed),
         directory symlinks on other platforms.
         """
-        outside = tempfile.mkdtemp()
+        outside = make_tmp()
         try:
-            secret = Path(outside) / "secret.txt"
-            secret.write_text("secret")
+            (outside / "secret.txt").write_text("secret")
 
             junction = tmpdir / "escape"
-            if not _create_dir_link(junction, Path(outside)):
+            if not _create_dir_link(junction, outside):
                 pytest.fail(
                     "Could not create directory junction — required for security test. "
                     "On Windows, ensure 'cmd' is available."
                 )
 
             allowed = resolve_allowed_directories([str(tmpdir)])
-            # Access a file through the junction — must be rejected
             with pytest.raises(PermissionError, match="symlink target outside allowed directories"):
                 run(validate_path(str(junction / "secret.txt"), allowed))
         finally:
@@ -376,22 +358,16 @@ class TestValidatePathRejections:
 
     def test_junction_inside_allowed_accepted(self, tmpdir):
         """
-        A directory junction/symlink inside allowed that points to ANOTHER location
-        inside allowed must be accepted.
-
-        Uses directory junctions on Windows (no elevated perms needed),
-        directory symlinks on other platforms.
+        A junction inside allowed pointing to ANOTHER location also inside
+        allowed must be accepted.
         """
         real_subdir = tmpdir / "real_subdir"
         real_subdir.mkdir()
-        target_file = real_subdir / "file.txt"
-        target_file.write_text("content")
+        (real_subdir / "file.txt").write_text("content")
 
         junction = tmpdir / "link_subdir"
         if not _create_dir_link(junction, real_subdir):
-            pytest.fail(
-                "Could not create directory junction — required for security test."
-            )
+            pytest.fail("Could not create directory junction — required for security test.")
 
         allowed = resolve_allowed_directories([str(tmpdir)])
         result = run(validate_path(str(junction / "file.txt"), allowed))
@@ -406,11 +382,11 @@ class TestValidatePathErrorMessages:
     """Error messages must exactly match the TS server strings for model self-correction."""
 
     def test_outside_allowed_message_format(self, tmpdir):
-        other = tempfile.mkdtemp()
+        other = make_tmp()
         try:
             allowed = resolve_allowed_directories([str(tmpdir)])
             with pytest.raises(PermissionError) as exc_info:
-                run(validate_path(other, allowed))
+                run(validate_path(str(other), allowed))
             msg = str(exc_info.value)
             assert "Access denied - path outside allowed directories:" in msg
             assert " not in " in msg
@@ -418,12 +394,12 @@ class TestValidatePathErrorMessages:
             shutil.rmtree(other, ignore_errors=True)
 
     def test_escape_message_format(self, tmpdir):
-        """Error message for junction/symlink escape must match TS server string exactly."""
-        outside = tempfile.mkdtemp()
+        """Error message for junction escape must match TS server string exactly."""
+        outside = make_tmp()
         try:
-            (Path(outside) / "s.txt").write_text("x")
+            (outside / "s.txt").write_text("x")
             junction = tmpdir / "escape"
-            if not _create_dir_link(junction, Path(outside)):
+            if not _create_dir_link(junction, outside):
                 pytest.fail("Could not create directory junction — required for this test.")
 
             allowed = resolve_allowed_directories([str(tmpdir)])

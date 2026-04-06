@@ -30,6 +30,10 @@ coverage.xml
 .pytest_cache/
 test_results_*.txt
 
+# Test temp dirs (created inside project, cleaned after tests, but never committed)
+tests/tmp/*
+!tests/tmp/.gitkeep
+
 # Virtual environments
 .venv/
 venv/
