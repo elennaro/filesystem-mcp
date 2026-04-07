@@ -218,6 +218,7 @@ def make_tests(test_dir: Path) -> list:
     root_prefix = (
         f"Project root you operate on is {td}. "
         f"DO NOT use filesystem tools or search tools outside the project root directory. "
+        f"If any tool call fails after more than 6 attempts of using it, report the error and STOP. "
     )
 
     def _has_path(content: str) -> bool:
