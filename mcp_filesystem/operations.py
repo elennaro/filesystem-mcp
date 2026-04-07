@@ -558,13 +558,18 @@ async def search_files(
     valid = await validate_path(path, allowed)
     matches: list[str] = []
 
-    for dirpath_str, dirnames, filenames in os.walk(valid):
+    for dirpath_str, dirnames, filenames in os.walk(valid, followlinks=False):
         current = Path(dirpath_str)
 
-        # Prune excluded directories in-place (modifying dirnames stops os.walk descent)
+        # Prune excluded directories and Windows junctions in-place.
+        # os.walk(followlinks=False) skips POSIX symlinks but still descends into
+        # Windows directory junctions (NTFS reparse points), because junctions
+        # appear as regular directories to DirEntry.is_dir(follow_symlinks=False).
+        # is_junction() (Python 3.12+) catches them on Windows.
         dirnames[:] = [
             d for d in dirnames
-            if not _matches_exclude(
+            if not (current / d).is_junction()
+            and not _matches_exclude(
                 str(current.relative_to(valid) / d).replace("\\", "/"),
                 exclude_patterns,
             )
@@ -614,7 +619,7 @@ async def grep_files(
     all non-binary files are searched.
 
     Binary files (those containing a null byte in the first 8 KB) are silently
-    skipped. Symlinks are never followed (followlinks=False).
+    skipped. Symlinks and Windows directory junctions are never followed.
 
     Output format:
       path:lineno:content   — matching lines
@@ -657,6 +662,9 @@ async def grep_files(
             if done:
                 break
             current = Path(dirpath_str)
+            # Prune Windows directory junctions — os.walk(followlinks=False) still
+            # descends into junctions because they appear as regular directories.
+            dirnames[:] = [d for d in dirnames if not (current / d).is_junction()]
             dirnames.sort()
             for name in sorted(filenames):
                 if done:

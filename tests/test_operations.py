@@ -10,6 +10,7 @@ Tests are independent of LM Studio and any model.
 import asyncio
 import json
 import os
+import subprocess
 from pathlib import Path
 from unittest.mock import patch
 
@@ -1147,20 +1148,39 @@ class TestGrepFiles:
             import shutil
             shutil.rmtree(str(outside), ignore_errors=True)
 
-    def test_symlinks_not_followed(self, tmpdir):
+    def test_dir_links_not_followed(self, tmpdir):
+        """grep_files must not read files through symlinks or Windows junctions
+        that point outside the allowed directory tree.
+
+        Uses mklink /J on Windows (no elevated privileges required) or a plain
+        directory symlink on other platforms. Neither skip nor xfail — if link
+        creation fails the environment is broken and the test should error.
+        """
         import shutil
         outside = make_tmp()
         try:
             (outside / "secret.txt").write_text("SECRET_CONTENT\n")
             link = tmpdir / "link_to_outside"
-            try:
+            if os.name == "nt":
+                result = subprocess.run(
+                    ["cmd", "/c", "mklink", "/J", str(link), str(outside)],
+                    capture_output=True,
+                )
+                assert result.returncode == 0, (
+                    f"mklink /J failed: {result.stderr!r} — "
+                    "cannot test junction security"
+                )
+            else:
                 link.symlink_to(outside, target_is_directory=True)
-            except (OSError, NotImplementedError):
-                pytest.skip("symlink creation not supported on this system")
             allowed = resolve_allowed_directories([str(tmpdir)])
             result = run(grep_files(str(tmpdir), "SECRET_CONTENT", allowed))
             assert result == "No matches found"
         finally:
+            if os.name == "nt" and (tmpdir / "link_to_outside").exists():
+                subprocess.run(
+                    ["cmd", "/c", "rmdir", str(tmpdir / "link_to_outside")],
+                    capture_output=True,
+                )
             shutil.rmtree(str(outside), ignore_errors=True)
 
     # --- Invalid patterns ---
