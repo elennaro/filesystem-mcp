@@ -15,6 +15,7 @@ import os
 import re
 import shutil
 import sys
+import time
 import urllib.request
 from datetime import datetime
 from pathlib import Path
@@ -633,17 +634,41 @@ def score_test(test: dict, tool_calls: list, content: str) -> tuple:
 
 # ── Run a single test ─────────────────────────────────────────────────────────
 
+def _extract_stats(data: dict) -> dict:
+    """Pull token counts and speed from the native API stats block.
+
+    Returns:
+        input_tokens:    prompt + context tokens fed to the model
+        content_tokens:  output tokens that are type=message (not reasoning)
+        reasoning_tokens: output tokens from type=reasoning (thinking)
+        toks_per_sec:    generation speed reported by LM Studio
+    """
+    stats = data.get("stats", {})
+    reasoning = stats.get("reasoning_output_tokens", 0) or 0
+    total_out = stats.get("total_output_tokens", 0) or 0
+    return {
+        "input_tokens": stats.get("input_tokens") or 0,
+        "content_tokens": total_out - reasoning,
+        "reasoning_tokens": reasoning,
+        "toks_per_sec": round(stats.get("tokens_per_second", 0) or 0, 1),
+    }
+
+
 def run_test(test: dict) -> dict:
     name = test["name"]
     print(f"  {name} ...", end="", flush=True)
 
     try:
+        t0 = time.monotonic()
         data = _chat(test["prompt"])
+        elapsed = round(time.monotonic() - t0, 1)
+
         content = _extract_content(data)
         tool_calls = _extract_tool_calls(data)
+        token_stats = _extract_stats(data)
 
         score, notes, is_loop, loop_reason = score_test(test, tool_calls, content)
-        print(f" {score}/10")
+        print(f" {score}/10  ({elapsed}s, {token_stats['content_tokens']} tok)")
 
         return {
             "name": name,
@@ -654,6 +679,8 @@ def run_test(test: dict) -> dict:
             "total_calls": len(tool_calls),
             "notes": notes,
             "error": None,
+            "elapsed_s": elapsed,
+            **token_stats,
         }
 
     except Exception as exc:
@@ -667,6 +694,11 @@ def run_test(test: dict) -> dict:
             "total_calls": 0,
             "notes": [],
             "error": str(exc),
+            "elapsed_s": 0.0,
+            "input_tokens": 0,
+            "content_tokens": 0,
+            "reasoning_tokens": 0,
+            "toks_per_sec": 0.0,
         }
 
 
@@ -736,37 +768,60 @@ def print_report(results: list, test_dir: Path, cleanup_ok: bool) -> None:
     loops = [r["name"] for r in results if r["is_loop"]]
     errors = [f"{r['name']}: {r['error']}" for r in results if r["error"]]
 
+    total_content_tok = sum(r["content_tokens"] for r in results)
+    total_reasoning_tok = sum(r["reasoning_tokens"] for r in results)
+    total_input_tok = sum(r["input_tokens"] for r in results)
+    total_elapsed = sum(r["elapsed_s"] for r in results)
+    avg_tps = (
+        round(sum(r["toks_per_sec"] for r in results if r["toks_per_sec"]) /
+              max(1, sum(1 for r in results if r["toks_per_sec"])), 1)
+        if results else 0
+    )
+
     print()
-    print("=" * 70)
+    print("=" * 90)
     print("=== filesystem-mcp E2E Test Report ===")
     print(f"Date:      {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     print(f"Model:     {MODEL}")
     print(f"Test dir:  {test_dir}")
     print()
 
-    col_tool = 32
-    print(f"{'TOOL':<{col_tool}} {'SCORE':>7}  {'LOOPS':>5}  {'CALLS':>5}  NOTES")
-    print("-" * 80)
+    col_t = 30
+    print(
+        f"{'TOOL':<{col_t}} {'SCORE':>7}  {'LOOPS':>5}  {'CALLS':>5}"
+        f"  {'TOK':>6}  {'TIME':>7}  NOTES"
+    )
+    print("-" * 90)
 
     for r in results:
         loop_marker = "LOOP" if r["is_loop"] else "-"
         notes_str = "; ".join(r["notes"]) if r["notes"] else ""
         if r["error"]:
             notes_str = f"ERROR: {r['error']}"
-        # Truncate notes for display
-        if len(notes_str) > 60:
-            notes_str = notes_str[:57] + "..."
+        if len(notes_str) > 40:
+            notes_str = notes_str[:37] + "..."
+        tok = r["content_tokens"] if not r["error"] else "-"
+        elapsed = f"{r['elapsed_s']}s" if not r["error"] else "-"
         print(
-            f"{r['name']:<{col_tool}} {r['score']:>3}/10  "
-            f"{loop_marker:>5}  {r['total_calls']:>5}  {notes_str}"
+            f"{r['name']:<{col_t}} {r['score']:>3}/10  "
+            f"{loop_marker:>5}  {r['total_calls']:>5}"
+            f"  {str(tok):>6}  {elapsed:>7}  {notes_str}"
         )
 
-    print("-" * 80)
+    print("-" * 90)
     print(f"OVERALL: {total}/{max_score} ({pct}%)")
+    print()
+    print("-- Token & timing summary " + "-" * 46)
+    print(f"  Content tokens (type=message):   {total_content_tok:>8}")
+    print(f"  Reasoning tokens (type=think):   {total_reasoning_tok:>8}")
+    print(f"  Input tokens:                    {total_input_tok:>8}")
+    print(f"  Total wall time:                 {total_elapsed:>7.1f}s")
+    print(f"  Avg generation speed:            {avg_tps:>7.1f} tok/s")
+    print()
     print(f"LOOPS DETECTED: {', '.join(loops) if loops else 'none'}")
     print(f"ERRORS: {'; '.join(errors) if errors else 'none'}")
     print(f"Cleanup: {'OK' if cleanup_ok else 'FAILED'}")
-    print("=" * 70)
+    print("=" * 90)
 
 
 # ── Main ──────────────────────────────────────────────────────────────────────
