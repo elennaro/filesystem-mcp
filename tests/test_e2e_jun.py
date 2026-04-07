@@ -24,6 +24,7 @@ from pathlib import Path
 LMSTUDIO_BASE_URL = "http://localhost:1234"
 DEFAULT_MODEL = "qwen3.5-27b@q4_k_xl"
 MODEL = DEFAULT_MODEL   # overridable via --model CLI arg
+VERBOSE = False         # overridable via --verbose CLI arg
 TIMEOUT = 300
 INTEGRATIONS = ["mcp/filesystem"]
 
@@ -574,6 +575,13 @@ def score_test(test: dict, tool_calls: list, content: str) -> tuple:
     if is_loop:
         return 0, [f"LOOP: {loop_reason}"], True, loop_reason
 
+    failed_calls = [tc for tc in tool_calls if not tc["success"]]
+    if failed_calls:
+        reasons = "; ".join(
+            f"{tc['tool']}: {tc['error']}" for tc in failed_calls
+        )
+        return 0, [f"TOOL ERROR: {reasons}"], False, ""
+
     score = 0
     notes = []
 
@@ -670,12 +678,21 @@ def run_test(test: dict) -> dict:
         score, notes, is_loop, loop_reason = score_test(test, tool_calls, content)
         print(f" {score}/10  ({elapsed}s, {token_stats['content_tokens']} tok)")
 
+        if VERBOSE:
+            for i, tc in enumerate(tool_calls, 1):
+                args_str = json.dumps(tc["arguments"], ensure_ascii=False)
+                if len(args_str) > 200:
+                    args_str = args_str[:197] + "..."
+                status = "OK" if tc["success"] else f"FAIL: {tc['error']}"
+                print(f"      [{i}] {tc['tool']}({args_str})  -> {status}")
+
         return {
             "name": name,
             "score": score,
             "is_loop": is_loop,
             "loop_reason": loop_reason,
             "tools_called": [tc["tool"] for tc in tool_calls],
+            "tool_calls": tool_calls,
             "total_calls": len(tool_calls),
             "notes": notes,
             "error": None,
@@ -766,6 +783,11 @@ def print_report(results: list, test_dir: Path, cleanup_ok: bool) -> None:
     pct = round(total / max_score * 100) if max_score else 0
 
     loops = [r["name"] for r in results if r["is_loop"]]
+    tool_errors = [
+        r["name"] for r in results
+        if not r["error"] and not r["is_loop"] and r["score"] == 0
+        and any(n.startswith("TOOL ERROR") for n in r["notes"])
+    ]
     errors = [f"{r['name']}: {r['error']}" for r in results if r["error"]]
 
     total_content_tok = sum(r["content_tokens"] for r in results)
@@ -819,6 +841,7 @@ def print_report(results: list, test_dir: Path, cleanup_ok: bool) -> None:
     print(f"  Avg generation speed:            {avg_tps:>7.1f} tok/s")
     print()
     print(f"LOOPS DETECTED: {', '.join(loops) if loops else 'none'}")
+    print(f"TOOL ERRORS:    {', '.join(tool_errors) if tool_errors else 'none'}")
     print(f"ERRORS: {'; '.join(errors) if errors else 'none'}")
     print(f"Cleanup: {'OK' if cleanup_ok else 'FAILED'}")
     print("=" * 90)
@@ -827,7 +850,7 @@ def print_report(results: list, test_dir: Path, cleanup_ok: bool) -> None:
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 def main() -> None:
-    global MODEL
+    global MODEL, VERBOSE
 
     parser = argparse.ArgumentParser(
         description="E2E test runner for Jun × filesystem-mcp integration"
@@ -843,8 +866,14 @@ def main() -> None:
         metavar="MODEL_ID",
         help=f"LM Studio model to test (default: {DEFAULT_MODEL})",
     )
+    parser.add_argument(
+        "--verbose", "-v",
+        action="store_true",
+        help="Print each tool call with its arguments after every test",
+    )
     args = parser.parse_args()
     MODEL = args.model
+    VERBOSE = args.verbose
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
 
