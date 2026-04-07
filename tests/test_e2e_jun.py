@@ -215,6 +215,10 @@ def make_tests(test_dir: Path) -> list:
       - wrong_tool_check(calls) -> bool: returns True if wrong tool was used instead
     """
     td = str(test_dir).replace("\\", "/")
+    root_prefix = (
+        f"Project root you operate on is {td}. "
+        f"DO NOT use filesystem tools or search tools outside the project root directory. "
+    )
 
     def _has_path(content: str) -> bool:
         return bool(re.search(r"[A-Za-z]:[/\\]\S+|/\S+", content))
@@ -238,7 +242,7 @@ def make_tests(test_dir: Path) -> list:
         # 2. list_directory
         {
             "name": "list_directory",
-            "prompt": f"List all files and directories inside {td}. Use the exact path.",
+            "prompt": root_prefix + f"List all files and directories inside {td}. Use the exact path.",
             "correct_tool": "list_directory",
             "wrong_tool": None,
             "verify_params": lambda calls, content: (
@@ -250,7 +254,7 @@ def make_tests(test_dir: Path) -> list:
         # 3. list_directory_with_sizes
         {
             "name": "list_directory_with_sizes",
-            "prompt": f"List files in {td} showing sizes in bytes.",
+            "prompt": root_prefix + f"List files in {td} showing sizes in bytes.",
             "correct_tool": "list_directory_with_sizes",
             "wrong_tool": "list_directory",
             "verify_params": lambda calls, content: (
@@ -268,7 +272,7 @@ def make_tests(test_dir: Path) -> list:
         # 4. directory_tree
         {
             "name": "directory_tree",
-            "prompt": f"Show the full recursive directory tree of {td} as JSON.",
+            "prompt": root_prefix + f"Show the full recursive directory tree of {td} as JSON.",
             "correct_tool": "directory_tree",
             "wrong_tool": None,
             "verify_params": lambda calls, content: (
@@ -280,9 +284,7 @@ def make_tests(test_dir: Path) -> list:
         # 5. read_text_file
         {
             "name": "read_text_file",
-            "prompt": (
-                f"Read {td}/fixture.txt and tell me exactly what line 3 says."
-            ),
+            "prompt": root_prefix + f"Read {td}/fixture.txt and tell me exactly what line 3 says.",
             "correct_tool": "read_text_file",
             "wrong_tool": None,
             "verify_params": lambda calls, content: (
@@ -294,9 +296,7 @@ def make_tests(test_dir: Path) -> list:
         # 6. read_multiple_files
         {
             "name": "read_multiple_files",
-            "prompt": (
-                f"Read {td}/a.txt and {td}/b.txt in a single operation."
-            ),
+            "prompt": root_prefix + f"Read {td}/a.txt and {td}/b.txt in a single operation.",
             "correct_tool": "read_multiple_files",
             "wrong_tool": "read_text_file",
             "verify_params": lambda calls, content: (
@@ -315,8 +315,9 @@ def make_tests(test_dir: Path) -> list:
         {
             "name": "write_file",
             "prompt": (
+                root_prefix +
                 f"Create a new file at {td}/written.txt containing exactly: "
-                f"WRITE_TEST_OK. Work only inside {td}."
+                f"WRITE_TEST_OK."
             ),
             "correct_tool": "write_file",
             "wrong_tool": None,
@@ -334,8 +335,9 @@ def make_tests(test_dir: Path) -> list:
         {
             "name": "edit_file",
             "prompt": (
+                root_prefix +
                 f"In {td}/editable.txt replace the word BEFORE with AFTER. "
-                f"Use edit_file. Work only inside {td}."
+                f"Use edit_file."
             ),
             "correct_tool": "edit_file",
             "wrong_tool": "write_file",
@@ -358,9 +360,7 @@ def make_tests(test_dir: Path) -> list:
         # 9. create_directory
         {
             "name": "create_directory",
-            "prompt": (
-                f"Create a directory at {td}/newdir/. Work only inside {td}."
-            ),
+            "prompt": root_prefix + f"Create a directory at {td}/newdir/.",
             "correct_tool": "create_directory",
             "wrong_tool": None,
             "verify_params": lambda calls, content, _d=test_dir: (
@@ -374,10 +374,7 @@ def make_tests(test_dir: Path) -> list:
         # 10. move_file
         {
             "name": "move_file",
-            "prompt": (
-                f"Rename {td}/rename_me.txt to {td}/renamed.txt. "
-                f"Work only inside {td}."
-            ),
+            "prompt": root_prefix + f"Rename {td}/rename_me.txt to {td}/renamed.txt.",
             "correct_tool": "move_file",
             "wrong_tool": None,
             "verify_params": lambda calls, content, _d=test_dir: (
@@ -393,9 +390,7 @@ def make_tests(test_dir: Path) -> list:
         # 11. search_files
         {
             "name": "search_files",
-            "prompt": (
-                f"Find all .py files under {td} by filename. I want file paths."
-            ),
+            "prompt": root_prefix + f"Find all .py files under {td} by filename. I want file paths.",
             "correct_tool": "search_files",
             "wrong_tool": "grep_files",
             "verify_params": lambda calls, content: (
@@ -411,7 +406,7 @@ def make_tests(test_dir: Path) -> list:
         # 12. grep_todo — basic literal pattern
         {
             "name": "grep_todo",
-            "prompt": f"Find all lines containing TODO inside files under {td}.",
+            "prompt": root_prefix + f"Find all lines containing TODO inside files under {td}.",
             "correct_tool": "grep_files",
             "wrong_tool": "read_text_file",
             "verify_params": lambda calls, content: (
@@ -428,6 +423,7 @@ def make_tests(test_dir: Path) -> list:
         {
             "name": "grep_alternation",
             "prompt": (
+                root_prefix +
                 f"In {td}/data.log find all lines that are either ERROR level or WARN level."
                 f" Use a single grep with an alternation regex pattern."
             ),
@@ -447,6 +443,7 @@ def make_tests(test_dir: Path) -> list:
         {
             "name": "grep_anchored",
             "prompt": (
+                root_prefix +
                 f"Find all comment lines (lines that start with #) in Python files under {td}."
                 f" Search only .py files."
             ),
@@ -465,9 +462,7 @@ def make_tests(test_dir: Path) -> list:
         # 15. grep_email — \w+@\w+\.\w+ pattern
         {
             "name": "grep_email",
-            "prompt": (
-                f"Find all email addresses in {td}/emails.txt using a regex pattern."
-            ),
+            "prompt": root_prefix + f"Find all email addresses in {td}/emails.txt using a regex pattern.",
             "correct_tool": "grep_files",
             "wrong_tool": "read_text_file",
             "verify_params": lambda calls, content: (
@@ -484,6 +479,7 @@ def make_tests(test_dir: Path) -> list:
         {
             "name": "grep_case_insensitive",
             "prompt": (
+                root_prefix +
                 f"Search for the word 'content' case-insensitively across all files under {td}."
                 f" Use grep with case-insensitive mode."
             ),
@@ -503,6 +499,7 @@ def make_tests(test_dir: Path) -> list:
         {
             "name": "grep_include_js",
             "prompt": (
+                root_prefix +
                 f"Find all function definitions in {td},"
                 f" but search only inside JavaScript (.js) files."
             ),
@@ -523,6 +520,7 @@ def make_tests(test_dir: Path) -> list:
         {
             "name": "grep_context",
             "prompt": (
+                root_prefix +
                 f"In {td}/data.log find the line containing 'Could not connect'"
                 f" and show 1 line of context before and after it."
             ),
@@ -543,9 +541,7 @@ def make_tests(test_dir: Path) -> list:
         # 19. get_file_info
         {
             "name": "get_file_info",
-            "prompt": (
-                f"What is the size and last-modified time of {td}/fixture.txt?"
-            ),
+            "prompt": root_prefix + f"What is the size and last-modified time of {td}/fixture.txt?",
             "correct_tool": "get_file_info",
             "wrong_tool": None,
             "verify_params": lambda calls, content: (
