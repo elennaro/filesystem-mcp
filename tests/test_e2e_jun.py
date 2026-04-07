@@ -22,6 +22,7 @@ from pathlib import Path
 # ── LM Studio config (mirrors lmstudio_mcp_server.py) ───────────────────────
 LMSTUDIO_BASE_URL = "http://localhost:1234"
 DEFAULT_MODEL = "qwen3.5-27b@q4_k_xl"
+MODEL = DEFAULT_MODEL   # overridable via --model CLI arg
 TIMEOUT = 300
 INTEGRATIONS = ["mcp/filesystem"]
 
@@ -58,7 +59,7 @@ SYSTEM_PROMPT = (
 def _chat(prompt: str) -> dict:
     """POST to /api/v1/chat and return parsed JSON response."""
     payload = {
-        "model": DEFAULT_MODEL,
+        "model": MODEL,
         "input": prompt,
         "system_prompt": SYSTEM_PROMPT,
         "integrations": INTEGRATIONS,
@@ -169,12 +170,43 @@ def create_fixtures(test_dir: Path) -> None:
     (test_dir / "subdir" / "nested.py").write_text(
         "# nested python file\n", encoding="utf-8"
     )
+    # Extra fixtures for grep tests
+    (test_dir / "data.log").write_text(
+        "2026-01-01 INFO  Server started\n"
+        "2026-01-02 WARN  Disk usage high\n"
+        "2026-01-03 ERROR Could not connect to database\n"
+        "2026-01-04 INFO  Request processed\n"
+        "2026-01-05 ERROR Timeout waiting for response\n",
+        encoding="utf-8",
+    )
+    (test_dir / "emails.txt").write_text(
+        "Contact: alice@example.com\n"
+        "Contact: bob@test.org\n"
+        "No email here\n"
+        "Manager: carol@company.net\n",
+        encoding="utf-8",
+    )
+    (test_dir / "code.js").write_text(
+        "import React from 'react';\n"
+        "import { useState } from 'react';\n"
+        "\n"
+        "function greet(name) {\n"
+        "  return `Hello, ${name}!`;\n"
+        "}\n"
+        "\n"
+        "function add(a, b) {\n"
+        "  return a + b;\n"
+        "}\n"
+        "\n"
+        "const PI = 3.14159;\n",
+        encoding="utf-8",
+    )
 
 
 # ── Test definitions ──────────────────────────────────────────────────────────
 
 def make_tests(test_dir: Path) -> list:
-    """Build the 13 test scenario dicts. Each has:
+    """Build the 19 test scenario dicts. Each has:
       - name, prompt, correct_tool, wrong_tool (optional)
       - verify_params(calls, content) -> (bool, str): params/side-effect check (+2)
       - verify_content(content) -> bool: keyword in response check (+1)
@@ -374,9 +406,9 @@ def make_tests(test_dir: Path) -> list:
                 and "grep_files" in [tc["tool"] for tc in calls]
             ),
         },
-        # 12. grep_files
+        # 12. grep_todo — basic literal pattern
         {
-            "name": "grep_files",
+            "name": "grep_todo",
             "prompt": f"Find all lines containing TODO inside files under {td}.",
             "correct_tool": "grep_files",
             "wrong_tool": "read_text_file",
@@ -390,7 +422,123 @@ def make_tests(test_dir: Path) -> list:
                 and "read_text_file" in [tc["tool"] for tc in calls]
             ),
         },
-        # 13. get_file_info
+        # 13. grep_alternation — ERROR|WARN
+        {
+            "name": "grep_alternation",
+            "prompt": (
+                f"In {td}/data.log find all lines that are either ERROR level or WARN level."
+                f" Use a single grep with an alternation regex pattern."
+            ),
+            "correct_tool": "grep_files",
+            "wrong_tool": "read_text_file",
+            "verify_params": lambda calls, content: (
+                "WARN" in content and "ERROR" in content and "Server started" not in content,
+                "WARN/ERROR lines missing or INFO lines leaked through",
+            ),
+            "verify_content": lambda content: "ERROR" in content and "WARN" in content,
+            "wrong_tool_check": lambda calls: (
+                "grep_files" not in [tc["tool"] for tc in calls]
+                and "read_text_file" in [tc["tool"] for tc in calls]
+            ),
+        },
+        # 14. grep_anchored — ^# in .py files only
+        {
+            "name": "grep_anchored",
+            "prompt": (
+                f"Find all comment lines (lines that start with #) in Python files under {td}."
+                f" Search only .py files."
+            ),
+            "correct_tool": "grep_files",
+            "wrong_tool": "read_text_file",
+            "verify_params": lambda calls, content: (
+                "# TODO" in content and "# nested python file" in content,
+                "comment lines from script.py or nested.py not in response",
+            ),
+            "verify_content": lambda content: "# TODO" in content,
+            "wrong_tool_check": lambda calls: (
+                "grep_files" not in [tc["tool"] for tc in calls]
+                and "read_text_file" in [tc["tool"] for tc in calls]
+            ),
+        },
+        # 15. grep_email — \w+@\w+\.\w+ pattern
+        {
+            "name": "grep_email",
+            "prompt": (
+                f"Find all email addresses in {td}/emails.txt using a regex pattern."
+            ),
+            "correct_tool": "grep_files",
+            "wrong_tool": "read_text_file",
+            "verify_params": lambda calls, content: (
+                "alice@example.com" in content and "carol@company.net" in content,
+                "email addresses not found in response",
+            ),
+            "verify_content": lambda content: "@" in content,
+            "wrong_tool_check": lambda calls: (
+                "grep_files" not in [tc["tool"] for tc in calls]
+                and "read_text_file" in [tc["tool"] for tc in calls]
+            ),
+        },
+        # 16. grep_case_insensitive — case_sensitive=False
+        {
+            "name": "grep_case_insensitive",
+            "prompt": (
+                f"Search for the word 'content' case-insensitively across all files under {td}."
+                f" Use grep with case-insensitive mode."
+            ),
+            "correct_tool": "grep_files",
+            "wrong_tool": "read_text_file",
+            "verify_params": lambda calls, content: (
+                "Content of A" in content and "Content of B" in content,
+                "Content of A or Content of B not in response",
+            ),
+            "verify_content": lambda content: "Content of A" in content,
+            "wrong_tool_check": lambda calls: (
+                "grep_files" not in [tc["tool"] for tc in calls]
+                and "read_text_file" in [tc["tool"] for tc in calls]
+            ),
+        },
+        # 17. grep_include_js — include="*.js" filter
+        {
+            "name": "grep_include_js",
+            "prompt": (
+                f"Find all function definitions in {td},"
+                f" but search only inside JavaScript (.js) files."
+            ),
+            "correct_tool": "grep_files",
+            "wrong_tool": "read_text_file",
+            "verify_params": lambda calls, content: (
+                "greet" in content and "add" in content
+                and "nested python" not in content,
+                "greet/add not found, or Python files leaked through",
+            ),
+            "verify_content": lambda content: "greet" in content,
+            "wrong_tool_check": lambda calls: (
+                "grep_files" not in [tc["tool"] for tc in calls]
+                and "read_text_file" in [tc["tool"] for tc in calls]
+            ),
+        },
+        # 18. grep_context — context_lines=1
+        {
+            "name": "grep_context",
+            "prompt": (
+                f"In {td}/data.log find the line containing 'Could not connect'"
+                f" and show 1 line of context before and after it."
+            ),
+            "correct_tool": "grep_files",
+            "wrong_tool": "read_text_file",
+            "verify_params": lambda calls, content: (
+                "Could not connect" in content
+                and "Disk usage" in content      # line before (WARN)
+                and "Request processed" in content,  # line after (INFO)
+                "match or context lines not in response",
+            ),
+            "verify_content": lambda content: "Could not connect" in content,
+            "wrong_tool_check": lambda calls: (
+                "grep_files" not in [tc["tool"] for tc in calls]
+                and "read_text_file" in [tc["tool"] for tc in calls]
+            ),
+        },
+        # 19. get_file_info
         {
             "name": "get_file_info",
             "prompt": (
@@ -524,28 +672,57 @@ def run_test(test: dict) -> dict:
 
 # ── Discover base dir ─────────────────────────────────────────────────────────
 
+def _extract_paths_from_text(text: str) -> list:
+    """Split a multi-line directory listing into individual clean paths."""
+    candidates = []
+    # Split on actual newlines and common separators
+    for chunk in re.split(r"[\n\r,;]+", text):
+        chunk = chunk.strip().strip("\"'[]{}() ")
+        # Accept Windows absolute paths and Unix absolute paths
+        if re.match(r"[A-Za-z]:[/\\]", chunk) or chunk.startswith("/"):
+            candidates.append(chunk.rstrip("/\\"))
+    return candidates
+
+
 def discover_base_dir() -> str:
-    """Ask Jun what directories it can access; return the first writable path."""
+    """Ask Jun what directories it can access; return the first existing path."""
     print("Asking Jun for allowed directories...")
     data = _chat("What directories can you access?")
     content = _extract_content(data)
     tool_calls = _extract_tool_calls(data)
 
-    # Prefer path extracted from tool output
+    candidates = []
+
+    # Prefer paths extracted from the tool output (properly JSON-decoded)
     for tc in tool_calls:
         if tc["tool"] == "list_allowed_directories":
-            raw = str(tc.get("raw_output", ""))
-            paths = re.findall(r"[A-Za-z]:[/\\][^\s\n\"',\]]+|/[^\s\n\"',\]]+", raw)
-            if paths:
-                return paths[0].rstrip("/\\")
+            raw = tc.get("raw_output", "")
+            try:
+                parsed = json.loads(raw)
+                if isinstance(parsed, list):
+                    for entry in parsed:
+                        text = entry.get("text", "")
+                        candidates.extend(_extract_paths_from_text(text))
+            except (json.JSONDecodeError, TypeError):
+                candidates.extend(_extract_paths_from_text(str(raw)))
 
-    # Fall back to parsing response content
-    paths = re.findall(r"[A-Za-z]:[/\\][^\s\n\"',\]]+|/[^\s\n\"',\]]+", content)
-    if paths:
-        return paths[0].rstrip("/\\")
+    # Fall back to parsing the response text
+    if not candidates:
+        candidates.extend(_extract_paths_from_text(content))
+
+    # Return first candidate that actually exists on disk
+    for path in candidates:
+        if os.path.isdir(path):
+            print(f"  Found allowed dirs: {candidates}")
+            return path
+
+    # If none verified, still try the first candidate
+    if candidates:
+        print(f"  Warning: no candidate dir verified on disk; trying {candidates[0]}")
+        return candidates[0]
 
     fallback = str(Path.home())
-    print(f"Warning: could not parse base dir from response; using {fallback}")
+    print(f"  Warning: could not parse base dir from response; using {fallback}")
     return fallback
 
 
@@ -563,7 +740,7 @@ def print_report(results: list, test_dir: Path, cleanup_ok: bool) -> None:
     print("=" * 70)
     print("=== filesystem-mcp E2E Test Report ===")
     print(f"Date:      {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-    print(f"Model:     {DEFAULT_MODEL}")
+    print(f"Model:     {MODEL}")
     print(f"Test dir:  {test_dir}")
     print()
 
@@ -595,6 +772,8 @@ def print_report(results: list, test_dir: Path, cleanup_ok: bool) -> None:
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 def main() -> None:
+    global MODEL
+
     parser = argparse.ArgumentParser(
         description="E2E test runner for Jun × filesystem-mcp integration"
     )
@@ -603,7 +782,14 @@ def main() -> None:
         action="store_true",
         help="Print prompts and fixture plan without calling LM Studio",
     )
+    parser.add_argument(
+        "--model",
+        default=DEFAULT_MODEL,
+        metavar="MODEL_ID",
+        help=f"LM Studio model to test (default: {DEFAULT_MODEL})",
+    )
     args = parser.parse_args()
+    MODEL = args.model
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
 
@@ -612,7 +798,7 @@ def main() -> None:
         test_dir = Path(base_dir) / f"mcp_e2e_test_{timestamp}"
 
         print("=== DRY RUN — no LM Studio calls will be made ===")
-        print(f"Model:    {DEFAULT_MODEL}")
+        print(f"Model:    {MODEL}")
         print(f"Endpoint: {LMSTUDIO_BASE_URL}/api/v1/chat")
         print(f"Integrations: {INTEGRATIONS}")
         print(f"Test dir: {test_dir}")
