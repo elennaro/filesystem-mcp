@@ -35,11 +35,89 @@ from mcp_filesystem.security import validate_path, validate_path_for_creation
 MAX_FILE_SIZE = 50 * 1024 * 1024  # 50 MB
 
 _BACKTICK_RE = re.compile(r"`+")
+_BINARY_PEEK = 8192  # bytes inspected for binary detection
 
 
 # ---------------------------------------------------------------------------
 # Internal helpers
 # ---------------------------------------------------------------------------
+
+def _is_binary_file(path: Path) -> bool:
+    """Return True if the file appears binary (null byte in first 8 KB)."""
+    try:
+        return b"\x00" in path.read_bytes()[:_BINARY_PEEK]
+    except OSError:
+        return True
+
+
+def _grep_file(
+    entry: Path,
+    regex: re.Pattern,
+    context_lines: int,
+    max_matches: int | None,
+) -> tuple[list[list[str]], int]:
+    """
+    Search a single file for lines matching regex.
+
+    Returns (groups, match_count). Each group is a list of formatted strings:
+      path:lineno:content  — for matching lines
+      path-lineno-content  — for context lines
+    Binary files and unreadable files return ([], 0).
+    """
+    if _is_binary_file(entry):
+        return [], 0
+    try:
+        text = entry.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return [], 0
+
+    lines = text.splitlines()
+    n = len(lines)
+    fp = str(entry)
+
+    # Collect matching line indices (0-based), stopping at max_matches
+    match_indices: list[int] = []
+    for i, line in enumerate(lines):
+        if max_matches is not None and len(match_indices) >= max_matches:
+            break
+        if regex.search(line):
+            match_indices.append(i)
+
+    if not match_indices:
+        return [], 0
+
+    if context_lines == 0:
+        # One single-line group per match; no context, no -- separators needed
+        return [
+            [f"{fp}:{i + 1}:{lines[i]}"]
+            for i in match_indices
+        ], len(match_indices)
+
+    # With context: merge overlapping or adjacent windows into contiguous ranges
+    match_set = set(match_indices)
+    ranges: list[tuple[int, int]] = []
+    for mi in match_indices:
+        lo = max(0, mi - context_lines)
+        hi = min(n - 1, mi + context_lines)
+        if ranges and lo <= ranges[-1][1] + 1:
+            ranges[-1] = (ranges[-1][0], max(ranges[-1][1], hi))
+        else:
+            ranges.append((lo, hi))
+
+    groups: list[list[str]] = []
+    for lo, hi in ranges:
+        group: list[str] = []
+        for i in range(lo, hi + 1):
+            lineno = i + 1
+            content = lines[i]
+            if i in match_set:
+                group.append(f"{fp}:{lineno}:{content}")
+            else:
+                group.append(f"{fp}-{lineno}-{content}")
+        groups.append(group)
+
+    return groups, len(match_indices)
+
 
 def _check_size(path: Path) -> None:
     """Raise ValueError if file exceeds the size limit."""
@@ -511,6 +589,92 @@ async def search_files(
     if not matches:
         return "No matches found"
     return "\n".join(matches)
+
+
+async def grep_files(
+    path: str,
+    pattern: str,
+    allowed: Sequence[Path],
+    *,
+    include: str | None = None,
+    case_sensitive: bool = True,
+    fixed_strings: bool = False,
+    context_lines: int = 0,
+    max_results: int | None = None,
+) -> str:
+    """
+    Search file contents for lines matching a pattern.
+
+    pattern is a Python regular expression by default. Set fixed_strings=True to
+    treat the pattern as a literal string (no regex interpretation — safe for
+    patterns containing regex special characters).
+
+    include is an optional glob filter on the relative file path from the search
+    root (e.g. '*.py' for root-level only, '**/*.py' for any depth). When omitted,
+    all non-binary files are searched.
+
+    Binary files (those containing a null byte in the first 8 KB) are silently
+    skipped. Symlinks are never followed (followlinks=False).
+
+    Output format:
+      path:lineno:content   — matching lines
+      path-lineno-content   — context lines (when context_lines > 0)
+    Non-adjacent groups are separated by '--'.
+
+    Returns 'No matches found' when there are no matches.
+
+    Python-only addition (not in the TS server). Contract inspired by mcp-ripgrep.
+    """
+    raw = re.escape(pattern) if fixed_strings else pattern
+    flags = re.IGNORECASE if not case_sensitive else 0
+    try:
+        regex = re.compile(raw, flags)
+    except re.error as exc:
+        raise ValueError(f"Invalid regex pattern {pattern!r}: {exc}") from exc
+
+    valid = await validate_path(path, allowed)
+
+    all_groups: list[list[str]] = []
+    total_matches = 0
+    done = False
+
+    def _visit(entry: Path) -> None:
+        nonlocal total_matches, done
+        remaining = None if max_results is None else max_results - total_matches
+        if remaining == 0:
+            done = True
+            return
+        groups, count = _grep_file(entry, regex, context_lines, remaining)
+        all_groups.extend(groups)
+        total_matches += count
+        if max_results is not None and total_matches >= max_results:
+            done = True
+
+    if valid.is_file():
+        _visit(valid)
+    else:
+        for dirpath_str, dirnames, filenames in os.walk(valid, followlinks=False):
+            if done:
+                break
+            current = Path(dirpath_str)
+            dirnames.sort()
+            for name in sorted(filenames):
+                if done:
+                    break
+                entry = current / name
+                if include is not None:
+                    rel = str(entry.relative_to(valid)).replace("\\", "/")
+                    if not _glob_match(rel, include):
+                        continue
+                _visit(entry)
+
+    if not all_groups:
+        return "No matches found"
+
+    if context_lines == 0:
+        # Flat: one match per group, no -- separators
+        return "\n".join(line for group in all_groups for line in group)
+    return "\n--\n".join("\n".join(group) for group in all_groups)
 
 
 _MEDIA_MIME_TYPES: dict[str, str] = {

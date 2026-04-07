@@ -4,9 +4,40 @@ A Python MCP filesystem server that exactly mirrors the [Official MCP TypeScript
 
 ## Tools
 
-Implements all 13 tools from the TS API (excluding `read_media_file`):
+### TS-compatible tools (mirrors the official MCP TypeScript filesystem server)
 
 `read_file` · `read_text_file` · `read_multiple_files` · `write_file` · `edit_file` · `create_directory` · `list_directory` · `list_directory_with_sizes` · `directory_tree` · `move_file` · `search_files` · `get_file_info` · `list_allowed_directories`
+
+### Python-only additions
+
+#### `grep_files` — search file contents
+
+Recursively search file contents for lines matching a pattern. Contract inspired by [mcp-ripgrep](https://github.com/mcollina/mcp-ripgrep).
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `path` | string | required | Root directory or single file to search |
+| `pattern` | string | required | Python regex (or literal string if `fixedStrings=True`) |
+| `include` | string | `null` | Glob filter on relative file path, e.g. `**/*.py` |
+| `caseSensitive` | bool | `true` | Case-sensitive matching |
+| `fixedStrings` | bool | `false` | Treat pattern as literal string, not regex |
+| `contextLines` | int | `0` | Lines of context before and after each match |
+| `maxResults` | int | `null` | Cap on total matching lines returned |
+
+**Output format:**
+```
+/abs/path/file.py:10:    matched line content
+/abs/path/file.py-9-    context line before    ← context uses -
+/abs/path/file.py:10:   matched line           ← match uses :
+/abs/path/file.py-11-   context line after
+--                                              ← separates non-adjacent groups
+```
+
+Binary files (null byte in first 8 KB) are silently skipped. Symlinks are never followed.
+
+#### `read_media_file` — read image or audio files
+
+Returns image/audio content with MIME type for vision-capable models.
 
 ## Usage
 

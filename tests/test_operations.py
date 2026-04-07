@@ -24,6 +24,7 @@ from mcp_filesystem.operations import (
     directory_tree,
     edit_file,
     get_file_info,
+    grep_files,
     list_directory,
     list_directory_with_sizes,
     move_file,
@@ -742,3 +743,437 @@ class TestReadMediaFile:
         allowed = resolve_allowed_directories([str(tmpdir)])
         with pytest.raises(PermissionError, match="Access denied"):
             run(read_media_file(str(p), allowed))
+
+
+# ---------------------------------------------------------------------------
+# grep_files
+# ---------------------------------------------------------------------------
+
+class TestGrepFiles:
+
+    # --- Basic matching ---
+
+    def test_basic_match_single_file(self, tmpdir):
+        f = tmpdir / "a.txt"
+        f.write_text("hello world\ngoodbye\n")
+        allowed = resolve_allowed_directories([str(tmpdir)])
+        result = run(grep_files(str(tmpdir), "hello", allowed))
+        assert "hello world" in result
+
+    def test_basic_match_directory_multi_file(self, tmpdir):
+        (tmpdir / "a.txt").write_text("match here\n")
+        (tmpdir / "b.txt").write_text("no hit\n")
+        (tmpdir / "c.txt").write_text("another match\n")
+        allowed = resolve_allowed_directories([str(tmpdir)])
+        result = run(grep_files(str(tmpdir), "match", allowed))
+        assert "a.txt" in result
+        assert "c.txt" in result
+        assert "b.txt" not in result
+
+    def test_no_matches_returns_sentinel(self, tmpdir):
+        (tmpdir / "f.txt").write_text("nothing here\n")
+        allowed = resolve_allowed_directories([str(tmpdir)])
+        result = run(grep_files(str(tmpdir), "XYZZY_NOMATCH", allowed))
+        assert result == "No matches found"
+
+    def test_output_format_path_colon_lineno_colon_content(self, tmpdir):
+        f = tmpdir / "src.py"
+        f.write_text("line one\ntarget line\nline three\n")
+        allowed = resolve_allowed_directories([str(tmpdir)])
+        result = run(grep_files(str(tmpdir), "target", allowed))
+        # Format: absolute_path:2:target line
+        assert ":2:target line" in result
+        assert str(f) in result
+
+    def test_line_numbers_are_one_based(self, tmpdir):
+        f = tmpdir / "f.txt"
+        f.write_text("alpha\nbeta\ngamma\n")
+        allowed = resolve_allowed_directories([str(tmpdir)])
+        result = run(grep_files(str(tmpdir), "gamma", allowed))
+        assert ":3:gamma" in result
+
+    # --- Regex patterns ---
+
+    def test_regex_digit_class(self, tmpdir):
+        (tmpdir / "f.txt").write_text("price: 42 dollars\n")
+        allowed = resolve_allowed_directories([str(tmpdir)])
+        result = run(grep_files(str(tmpdir), r"\d+", allowed))
+        assert "price: 42 dollars" in result
+
+    def test_regex_word_boundary(self, tmpdir):
+        (tmpdir / "f.txt").write_text("foo foobar bar\n")
+        allowed = resolve_allowed_directories([str(tmpdir)])
+        # \bfoo\b matches 'foo' but not 'foobar'
+        result = run(grep_files(str(tmpdir), r"\bfoo\b", allowed))
+        assert "foo foobar bar" in result  # line matched because 'foo' is in it
+
+    def test_regex_alternation(self, tmpdir):
+        (tmpdir / "f.txt").write_text("apple\nbanana\ncherry\n")
+        allowed = resolve_allowed_directories([str(tmpdir)])
+        result = run(grep_files(str(tmpdir), r"apple|cherry", allowed))
+        assert "apple" in result
+        assert "cherry" in result
+        assert "banana" not in result
+
+    def test_regex_capture_groups_work(self, tmpdir):
+        (tmpdir / "f.txt").write_text('{"type": "message"}\n')
+        allowed = resolve_allowed_directories([str(tmpdir)])
+        result = run(grep_files(str(tmpdir), r'"type":\s*"(\w+)"', allowed))
+        assert '"type"' in result
+
+    def test_regex_lookahead(self, tmpdir):
+        (tmpdir / "f.txt").write_text("foo123\nfoobar\n")
+        allowed = resolve_allowed_directories([str(tmpdir)])
+        # foo followed by digit
+        result = run(grep_files(str(tmpdir), r"foo(?=\d)", allowed))
+        assert "foo123" in result
+        assert "foobar" not in result
+
+    def test_regex_anchors_start_and_end(self, tmpdir):
+        (tmpdir / "f.txt").write_text("start here\nnot at start\nend\n")
+        allowed = resolve_allowed_directories([str(tmpdir)])
+        result = run(grep_files(str(tmpdir), r"^start", allowed))
+        assert "start here" in result
+        assert "not at start" not in result
+
+    def test_regex_inside_json_object(self, tmpdir):
+        """Realistic LLM use case: search JSON for a type field."""
+        (tmpdir / "data.json").write_text(
+            '{"type": "message", "content": "hello"}\n'
+            '{"type": "tool_result", "data": {}}\n'
+            '{"event": "ping"}\n'
+        )
+        allowed = resolve_allowed_directories([str(tmpdir)])
+        result = run(grep_files(str(tmpdir), r'"type":\s*"\w+"', allowed))
+        assert '"type": "message"' in result
+        assert '"type": "tool_result"' in result
+        assert '"event": "ping"' not in result
+
+    # --- Escaping correctness ---
+
+    def test_double_escaping_fix_regex_metachar_matches_digit(self, tmpdir):
+        """\\d must be interpreted as regex 'any digit', not the literal chars \\d.
+        Verifies the impl does NOT call re.escape() on regex patterns."""
+        (tmpdir / "has_digit.txt").write_text("price: 99 dollars\n")
+        # Literal two chars backslash+d — contains no digit characters
+        (tmpdir / "has_backslash_d.txt").write_text("pattern: \\d+\n")
+        allowed = resolve_allowed_directories([str(tmpdir)])
+        result = run(grep_files(str(tmpdir), r"\d", allowed))
+        assert "has_digit.txt" in result       # digit found
+        assert "has_backslash_d.txt" not in result  # \\d is not a digit
+
+    def test_triple_escaping_fix_escaped_dot_is_literal(self, tmpdir):
+        """\\. must match a literal dot (not any char).
+        Verifies no extra escaping layer is applied to the pattern."""
+        (tmpdir / "with_dot.txt").write_text("file.py\n")
+        (tmpdir / "no_dot.txt").write_text("filepy\n")  # no dot
+        allowed = resolve_allowed_directories([str(tmpdir)])
+        result = run(grep_files(str(tmpdir), r"\.", allowed))
+        assert "with_dot.txt" in result   # dot found
+        assert "no_dot.txt" not in result  # no dot present
+
+    def test_triple_escaping_literal_backslash_dot_sequence(self, tmpdir):
+        r"""Pattern \\\.py (regex: literal backslash then literal dot then py)
+        should only match the exact chars \.py in the file."""
+        (tmpdir / "regex_file.txt").write_text(r"match \.py here" + "\n")
+        (tmpdir / "normal.txt").write_text("match .py here\n")  # dot but no backslash
+        allowed = resolve_allowed_directories([str(tmpdir)])
+        # r"\\\.py": regex \\\.py = escaped-backslash + escaped-dot + py
+        # matches the literal string "\.py"
+        result = run(grep_files(str(tmpdir), r"\\\.py", allowed))
+        assert "regex_file.txt" in result
+        assert "normal.txt" not in result
+
+    def test_fixed_strings_regex_special_chars_treated_literally(self, tmpdir):
+        """fixed_strings=True: pattern [a-z]+ is searched literally, not as char class."""
+        (tmpdir / "f.txt").write_text("[a-z]+ in file\nno brackets here\n")
+        allowed = resolve_allowed_directories([str(tmpdir)])
+        result = run(grep_files(str(tmpdir), "[a-z]+", allowed, fixed_strings=True))
+        assert "[a-z]+ in file" in result
+        assert "no brackets here" not in result
+
+    def test_fixed_strings_backslash_d_is_literal(self, tmpdir):
+        r"""fixed_strings=True: pattern \d must match the literal two chars \d,
+        not any digit."""
+        (tmpdir / "has_digit.txt").write_text("value: 99\n")
+        (tmpdir / "has_backslash_d.txt").write_text("pattern: \\d+\n")
+        allowed = resolve_allowed_directories([str(tmpdir)])
+        result = run(grep_files(str(tmpdir), r"\d", allowed, fixed_strings=True))
+        assert "has_backslash_d.txt" in result   # literal \\d matched
+        assert "has_digit.txt" not in result     # digit 99 is not the chars \\d
+
+    def test_fixed_strings_dot_does_not_match_any_char(self, tmpdir):
+        """fixed_strings=True: 'a.b' matches 'a.b' exactly, not 'axb'."""
+        (tmpdir / "exact.txt").write_text("a.b\n")
+        (tmpdir / "wild.txt").write_text("axb\n")
+        allowed = resolve_allowed_directories([str(tmpdir)])
+        result = run(grep_files(str(tmpdir), "a.b", allowed, fixed_strings=True))
+        assert "exact.txt" in result
+        assert "wild.txt" not in result
+
+    def test_fixed_strings_parens_and_plus_literal(self, tmpdir):
+        """fixed_strings=True: '(foo)+' matches the literal string '(foo)+'."""
+        (tmpdir / "f.txt").write_text("regex: (foo)+\n")
+        (tmpdir / "g.txt").write_text("foofoo\n")
+        allowed = resolve_allowed_directories([str(tmpdir)])
+        result = run(grep_files(str(tmpdir), "(foo)+", allowed, fixed_strings=True))
+        assert "f.txt" in result
+        assert "g.txt" not in result
+
+    # --- Case sensitivity ---
+
+    def test_case_sensitive_default(self, tmpdir):
+        (tmpdir / "f.txt").write_text("Hello World\nhello world\n")
+        allowed = resolve_allowed_directories([str(tmpdir)])
+        result = run(grep_files(str(tmpdir), "Hello", allowed))
+        assert "Hello World" in result
+        assert "hello world" not in result
+
+    def test_case_insensitive(self, tmpdir):
+        (tmpdir / "f.txt").write_text("Hello World\nhello world\n")
+        allowed = resolve_allowed_directories([str(tmpdir)])
+        result = run(grep_files(str(tmpdir), "hello", allowed, case_sensitive=False))
+        assert "Hello World" in result
+        assert "hello world" in result
+
+    # --- include glob filter ---
+
+    def test_include_filters_by_extension(self, tmpdir):
+        (tmpdir / "code.py").write_text("TARGET\n")
+        (tmpdir / "data.txt").write_text("TARGET\n")
+        allowed = resolve_allowed_directories([str(tmpdir)])
+        result = run(grep_files(str(tmpdir), "TARGET", allowed, include="*.py"))
+        assert "code.py" in result
+        assert "data.txt" not in result
+
+    def test_include_double_star_searches_recursively(self, tmpdir):
+        sub = tmpdir / "src"
+        sub.mkdir()
+        (sub / "deep.py").write_text("TARGET\n")
+        (tmpdir / "root.py").write_text("TARGET\n")
+        (tmpdir / "root.txt").write_text("TARGET\n")
+        allowed = resolve_allowed_directories([str(tmpdir)])
+        result = run(grep_files(str(tmpdir), "TARGET", allowed, include="**/*.py"))
+        assert "deep.py" in result
+        assert "root.py" in result
+        assert "root.txt" not in result
+
+    def test_include_no_file_match_returns_no_matches(self, tmpdir):
+        (tmpdir / "f.js").write_text("TARGET\n")
+        allowed = resolve_allowed_directories([str(tmpdir)])
+        result = run(grep_files(str(tmpdir), "TARGET", allowed, include="*.py"))
+        assert result == "No matches found"
+
+    # --- Context lines ---
+
+    def test_context_lines_before_and_after(self, tmpdir):
+        f = tmpdir / "f.txt"
+        f.write_text("before\nmatch line\nafter\n")
+        allowed = resolve_allowed_directories([str(tmpdir)])
+        result = run(grep_files(str(tmpdir), "match line", allowed, context_lines=1))
+        assert "before" in result
+        assert "match line" in result
+        assert "after" in result
+
+    def test_context_match_line_format_colon(self, tmpdir):
+        f = tmpdir / "f.txt"
+        f.write_text("before\nmatch\nafter\n")
+        allowed = resolve_allowed_directories([str(tmpdir)])
+        result = run(grep_files(str(tmpdir), "match", allowed, context_lines=1))
+        assert ":2:match" in result  # match line uses :
+
+    def test_context_line_format_dash(self, tmpdir):
+        f = tmpdir / "f.txt"
+        f.write_text("context\nmatch\ncontext\n")
+        allowed = resolve_allowed_directories([str(tmpdir)])
+        result = run(grep_files(str(tmpdir), "match", allowed, context_lines=1))
+        assert "-1-context" in result  # context line uses -
+
+    def test_context_at_start_of_file_no_lines_before(self, tmpdir):
+        f = tmpdir / "f.txt"
+        f.write_text("match\nsecond\nthird\n")
+        allowed = resolve_allowed_directories([str(tmpdir)])
+        result = run(grep_files(str(tmpdir), "match", allowed, context_lines=2))
+        lines = result.splitlines()
+        # First output line must be the match (no context before line 1)
+        assert lines[0].endswith(":1:match")
+
+    def test_context_at_end_of_file_no_lines_after(self, tmpdir):
+        f = tmpdir / "f.txt"
+        f.write_text("first\nsecond\nmatch\n")
+        allowed = resolve_allowed_directories([str(tmpdir)])
+        result = run(grep_files(str(tmpdir), "match", allowed, context_lines=2))
+        lines = result.splitlines()
+        assert lines[-1].endswith(":3:match")
+
+    def test_context_non_adjacent_groups_separated_by_dashes(self, tmpdir):
+        f = tmpdir / "f.txt"
+        # matches at line 1 and line 10 (far apart with context_lines=1)
+        lines = ["line"] * 12
+        lines[0] = "match_a"
+        lines[9] = "match_b"
+        f.write_text("\n".join(lines))
+        allowed = resolve_allowed_directories([str(tmpdir)])
+        result = run(grep_files(str(tmpdir), "match_", allowed, context_lines=1))
+        assert "--" in result
+
+    def test_context_overlapping_windows_merged_no_separator(self, tmpdir):
+        f = tmpdir / "f.txt"
+        # matches at lines 2 and 4 with context_lines=2 — windows overlap
+        lines = ["x", "match_a", "x", "match_b", "x", "x", "x"]
+        f.write_text("\n".join(lines))
+        allowed = resolve_allowed_directories([str(tmpdir)])
+        result = run(grep_files(str(tmpdir), "match_", allowed, context_lines=2))
+        assert "--" not in result  # single merged group
+
+    def test_context_zero_no_separator_between_matches(self, tmpdir):
+        f = tmpdir / "f.txt"
+        f.write_text("match\nother\nmatch\n")
+        allowed = resolve_allowed_directories([str(tmpdir)])
+        result = run(grep_files(str(tmpdir), "match", allowed, context_lines=0))
+        assert "--" not in result
+
+    # --- max_results ---
+
+    def test_max_results_limits_total_match_count(self, tmpdir):
+        f = tmpdir / "f.txt"
+        f.write_text("\n".join(f"match {i}" for i in range(20)))
+        allowed = resolve_allowed_directories([str(tmpdir)])
+        result = run(grep_files(str(tmpdir), "match", allowed, max_results=5))
+        assert result.count("match") == 5
+
+    def test_max_results_zero_returns_no_matches_found(self, tmpdir):
+        (tmpdir / "f.txt").write_text("match\n")
+        allowed = resolve_allowed_directories([str(tmpdir)])
+        result = run(grep_files(str(tmpdir), "match", allowed, max_results=0))
+        assert result == "No matches found"
+
+    def test_max_results_larger_than_total_returns_all(self, tmpdir):
+        (tmpdir / "f.txt").write_text("match\nmatch\n")
+        allowed = resolve_allowed_directories([str(tmpdir)])
+        result = run(grep_files(str(tmpdir), "match", allowed, max_results=100))
+        assert result.count("match") == 2
+
+    # --- Binary file handling ---
+
+    def test_binary_file_with_null_byte_skipped(self, tmpdir):
+        binary = tmpdir / "data.bin"
+        binary.write_bytes(b"match\x00binary\n")
+        text = tmpdir / "text.txt"
+        text.write_text("match text\n")
+        allowed = resolve_allowed_directories([str(tmpdir)])
+        result = run(grep_files(str(tmpdir), "match", allowed))
+        assert "text.txt" in result
+        assert "data.bin" not in result
+
+    def test_non_binary_file_is_searched(self, tmpdir):
+        (tmpdir / "f.txt").write_text("hello world\n")
+        allowed = resolve_allowed_directories([str(tmpdir)])
+        result = run(grep_files(str(tmpdir), "hello", allowed))
+        assert "hello world" in result
+
+    # --- Edge cases ---
+
+    def test_empty_file_no_match(self, tmpdir):
+        (tmpdir / "empty.txt").write_bytes(b"")
+        allowed = resolve_allowed_directories([str(tmpdir)])
+        result = run(grep_files(str(tmpdir), "anything", allowed))
+        assert result == "No matches found"
+
+    def test_single_line_no_trailing_newline(self, tmpdir):
+        f = tmpdir / "f.txt"
+        f.write_bytes(b"single line without newline")
+        allowed = resolve_allowed_directories([str(tmpdir)])
+        result = run(grep_files(str(tmpdir), "single", allowed))
+        assert "single line" in result
+
+    def test_crlf_line_endings_no_carriage_return_in_output(self, tmpdir):
+        f = tmpdir / "f.txt"
+        f.write_bytes(b"first\r\nmatch here\r\nlast\r\n")
+        allowed = resolve_allowed_directories([str(tmpdir)])
+        result = run(grep_files(str(tmpdir), "match", allowed))
+        assert "match here" in result
+        assert "\r" not in result  # no carriage return in output
+
+    def test_unicode_content_emoji(self, tmpdir):
+        (tmpdir / "f.txt").write_text("hello 🎉 world\n", encoding="utf-8")
+        allowed = resolve_allowed_directories([str(tmpdir)])
+        result = run(grep_files(str(tmpdir), "🎉", allowed))
+        assert "🎉" in result
+
+    def test_unicode_content_cjk(self, tmpdir):
+        (tmpdir / "f.txt").write_text("日本語テスト\n", encoding="utf-8")
+        allowed = resolve_allowed_directories([str(tmpdir)])
+        result = run(grep_files(str(tmpdir), "テスト", allowed))
+        assert "日本語テスト" in result
+
+    def test_match_on_first_line(self, tmpdir):
+        (tmpdir / "f.txt").write_text("FIRST\nsecond\nthird\n")
+        allowed = resolve_allowed_directories([str(tmpdir)])
+        result = run(grep_files(str(tmpdir), "FIRST", allowed))
+        assert ":1:FIRST" in result
+
+    def test_match_on_last_line(self, tmpdir):
+        (tmpdir / "f.txt").write_text("first\nsecond\nLAST\n")
+        allowed = resolve_allowed_directories([str(tmpdir)])
+        result = run(grep_files(str(tmpdir), "LAST", allowed))
+        assert ":3:LAST" in result
+
+    def test_single_file_as_path_argument(self, tmpdir):
+        f = tmpdir / "only.txt"
+        f.write_text("needle in file\n")
+        allowed = resolve_allowed_directories([str(tmpdir)])
+        result = run(grep_files(str(f), "needle", allowed))
+        assert "needle" in result
+
+    def test_recursive_subdirectory_search(self, tmpdir):
+        sub = tmpdir / "sub" / "deep"
+        sub.mkdir(parents=True)
+        (sub / "buried.txt").write_text("deep match\n")
+        allowed = resolve_allowed_directories([str(tmpdir)])
+        result = run(grep_files(str(tmpdir), "deep match", allowed))
+        assert "buried.txt" in result
+
+    # --- Security ---
+
+    def test_path_outside_allowed_raises_permission_error(self, tmpdir):
+        outside = make_tmp()
+        try:
+            (outside / "f.txt").write_text("TARGET\n")
+            allowed = resolve_allowed_directories([str(tmpdir)])
+            with pytest.raises(PermissionError, match="Access denied"):
+                run(grep_files(str(outside), "TARGET", allowed))
+        finally:
+            import shutil
+            shutil.rmtree(str(outside), ignore_errors=True)
+
+    def test_symlinks_not_followed(self, tmpdir):
+        import shutil
+        outside = make_tmp()
+        try:
+            (outside / "secret.txt").write_text("SECRET_CONTENT\n")
+            link = tmpdir / "link_to_outside"
+            try:
+                link.symlink_to(outside, target_is_directory=True)
+            except (OSError, NotImplementedError):
+                pytest.skip("symlink creation not supported on this system")
+            allowed = resolve_allowed_directories([str(tmpdir)])
+            result = run(grep_files(str(tmpdir), "SECRET_CONTENT", allowed))
+            assert result == "No matches found"
+        finally:
+            shutil.rmtree(str(outside), ignore_errors=True)
+
+    # --- Invalid patterns ---
+
+    def test_invalid_regex_raises_value_error(self, tmpdir):
+        (tmpdir / "f.txt").write_text("content\n")
+        allowed = resolve_allowed_directories([str(tmpdir)])
+        with pytest.raises(ValueError, match="Invalid regex pattern"):
+            run(grep_files(str(tmpdir), "[unclosed", allowed))
+
+    def test_fixed_strings_never_raises_for_regex_invalid_input(self, tmpdir):
+        (tmpdir / "f.txt").write_text("[unclosed bracket here\n")
+        allowed = resolve_allowed_directories([str(tmpdir)])
+        # Would raise if not fixed_strings; must not raise with fixed_strings=True
+        result = run(grep_files(str(tmpdir), "[unclosed", allowed, fixed_strings=True))
+        assert "[unclosed" in result

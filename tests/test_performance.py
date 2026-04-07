@@ -26,6 +26,7 @@ import pytest
 from mcp_filesystem.operations import (
     directory_tree,
     edit_file,
+    grep_files,
     read_media_file,
     read_text_file,
     search_files,
@@ -55,6 +56,7 @@ BUDGET_EDIT_LARGE = 2.0   # edit_file: 10 edits on a 1 000-line file
 BUDGET_TREE_200   = 3.0   # directory_tree on a 200-entry flat tree
 BUDGET_SEARCH_200 = 3.0   # search_files on a 200-entry flat tree
 BUDGET_MEDIA_1MB  = 2.0   # read_media_file on a 1 MB binary file
+BUDGET_GREP_200   = 5.0   # grep_files on 200 files × 50 lines with context_lines=2
 
 
 # ---------------------------------------------------------------------------
@@ -194,4 +196,25 @@ class TestReadMediaFilePerf:
         elapsed = _elapsed(read_media_file(str(f), allowed))
         assert elapsed < BUDGET_MEDIA_1MB, (
             f"read_media_file 1 MB PNG took {elapsed:.3f}s — budget {BUDGET_MEDIA_1MB}s"
+        )
+
+
+# ---------------------------------------------------------------------------
+# grep_files
+# ---------------------------------------------------------------------------
+
+class TestGrepFilesPerf:
+    def test_grep_200_files_with_context(self, tmpdir):
+        # 200 files × 50 lines, one match per file, context_lines=2
+        for i in range(200):
+            lines = [f"line {j:04d} content" for j in range(50)]
+            lines[25] = f"TARGET_MATCH_{i:03d}"
+            (tmpdir / f"file_{i:03d}.py").write_text("\n".join(lines))
+        allowed = resolve_allowed_directories([str(tmpdir)])
+        elapsed = _elapsed(
+            grep_files(str(tmpdir), "TARGET_MATCH", allowed, context_lines=2)
+        )
+        assert elapsed < BUDGET_GREP_200, (
+            f"grep_files 200 files with context took {elapsed:.3f}s "
+            f"— budget {BUDGET_GREP_200}s"
         )

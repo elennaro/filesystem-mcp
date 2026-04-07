@@ -30,6 +30,7 @@ from mcp_filesystem.operations import (
     directory_tree,
     edit_file,
     get_file_info,
+    grep_files,
     list_directory,
     list_directory_with_sizes,
     move_file,
@@ -267,6 +268,42 @@ def create_server(allowed_dirs: list[str]) -> FastMCP:
     )
     async def _move_file(source: str, destination: str) -> str:
         return await move_file(source, destination, allowed)
+
+    # -----------------------------------------------------------------------
+    # grep_files
+    # -----------------------------------------------------------------------
+
+    @mcp.tool(
+        name="grep_files",
+        description=(
+            "Search file contents for lines matching a pattern. "
+            "pattern is a Python regular expression by default; set fixedStrings=True "
+            "for a literal (non-regex) search — safe when the search term contains "
+            "regex special characters like ., (, [, \\. "
+            "Returns matching lines as path:lineNumber:lineContent. "
+            "Use contextLines to include N lines before and after each match. "
+            "Use include to restrict search to specific file types (e.g. '**/*.py'). "
+            "Binary files are skipped automatically. Symlinks are not followed. "
+            "Only works within allowed directories."
+        ),
+    )
+    async def _grep_files(
+        path: str,
+        pattern: str,
+        include: Optional[str] = None,
+        caseSensitive: bool = True,
+        fixedStrings: bool = False,
+        contextLines: int = 0,
+        maxResults: Optional[int] = None,
+    ) -> str:
+        return await grep_files(
+            path, pattern, allowed,
+            include=include,
+            case_sensitive=caseSensitive,
+            fixed_strings=fixedStrings,
+            context_lines=contextLines,
+            max_results=maxResults,
+        )
 
     # -----------------------------------------------------------------------
     # search_files
