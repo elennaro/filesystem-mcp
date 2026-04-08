@@ -12,7 +12,16 @@ specified directories are inaccessible.
 The server communicates via stdio using the MCP protocol.
 """
 
+import io
 import sys
+
+# Force UTF-8 on stderr before FastMCP initialises its Rich console.
+# On Windows, piped streams use the system code page by default; Rich's
+# block-drawing characters can't be encoded and fall back to \uXXXX escapes.
+if hasattr(sys.stderr, "reconfigure"):
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+else:
+    sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding="utf-8", errors="replace")
 
 from mcp_filesystem.server import create_server
 
@@ -27,7 +36,7 @@ def main() -> None:
 
     allowed_dirs = sys.argv[1:]
     mcp = create_server(allowed_dirs)
-    mcp.run(transport="stdio")
+    mcp.run(transport="stdio", show_banner=False)
 
 
 if __name__ == "__main__":
