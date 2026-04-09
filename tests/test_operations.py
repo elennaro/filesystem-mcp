@@ -29,6 +29,7 @@ from mcp_filesystem.operations import (
     list_directory,
     list_directory_with_sizes,
     move_file,
+    read_file_with_line_numbers,
     read_media_file,
     read_multiple_files,
     read_text_file,
@@ -234,6 +235,350 @@ class TestReadTextFile:
         with patch("mcp_filesystem.operations.MAX_FILE_SIZE", 0):
             with pytest.raises(ValueError, match="File too large"):
                 run(read_text_file(str(f), allowed))
+
+
+# ---------------------------------------------------------------------------
+# read_file_with_line_numbers
+# ---------------------------------------------------------------------------
+
+class TestReadFileWithLineNumbers:
+    def test_full_file_basic(self, tmpdir):
+        f = tmpdir / "abc.txt"
+        f.write_text("alpha\nbeta\ngamma")
+        allowed = resolve_allowed_directories([str(tmpdir)])
+        result = run(read_file_with_line_numbers(str(f), allowed))
+        assert result == "1: alpha\n2: beta\n3: gamma"
+
+    def test_empty_file(self, tmpdir):
+        f = tmpdir / "empty.txt"
+        f.write_text("")
+        allowed = resolve_allowed_directories([str(tmpdir)])
+        result = run(read_file_with_line_numbers(str(f), allowed))
+        assert result == ""
+
+    def test_single_line(self, tmpdir):
+        f = tmpdir / "one.txt"
+        f.write_text("only line")
+        allowed = resolve_allowed_directories([str(tmpdir)])
+        result = run(read_file_with_line_numbers(str(f), allowed))
+        assert result == "1: only line"
+
+    def test_single_line_with_trailing_newline(self, tmpdir):
+        f = tmpdir / "one_nl.txt"
+        f.write_text("only line\n")
+        allowed = resolve_allowed_directories([str(tmpdir)])
+        result = run(read_file_with_line_numbers(str(f), allowed))
+        assert result == "1: only line"
+
+    def test_line_number_padding_small(self, tmpdir):
+        f = tmpdir / "five.txt"
+        f.write_text("\n".join(f"line{i}" for i in range(5)))
+        allowed = resolve_allowed_directories([str(tmpdir)])
+        result = run(read_file_with_line_numbers(str(f), allowed))
+        lines = result.split("\n")
+        assert lines[0] == "1: line0"
+        assert lines[4] == "5: line4"
+
+    def test_line_number_padding_wide(self, tmpdir):
+        """Lines 1-101: width 3 — numbers right-aligned."""
+        f = tmpdir / "wide.txt"
+        f.write_text("\n".join(f"L{i}" for i in range(101)))
+        allowed = resolve_allowed_directories([str(tmpdir)])
+        result = run(read_file_with_line_numbers(str(f), allowed))
+        lines = result.split("\n")
+        assert lines[0] == "  1: L0"
+        assert lines[8] == "  9: L8"
+        assert lines[9] == " 10: L9"
+        assert lines[100] == "101: L100"
+
+    def test_head_parameter(self, tmpdir):
+        f = tmpdir / "lines.txt"
+        f.write_text("\n".join(f"line{i}" for i in range(10)))
+        allowed = resolve_allowed_directories([str(tmpdir)])
+        result = run(read_file_with_line_numbers(str(f), allowed, head=3))
+        assert result == "1: line0\n2: line1\n3: line2"
+
+    def test_head_zero(self, tmpdir):
+        f = tmpdir / "lines.txt"
+        f.write_text("a\nb\nc\n")
+        allowed = resolve_allowed_directories([str(tmpdir)])
+        result = run(read_file_with_line_numbers(str(f), allowed, head=0))
+        assert result == ""
+
+    def test_head_negative(self, tmpdir):
+        f = tmpdir / "lines.txt"
+        f.write_text("a\nb\nc\n")
+        allowed = resolve_allowed_directories([str(tmpdir)])
+        result = run(read_file_with_line_numbers(str(f), allowed, head=-5))
+        assert result == ""
+
+    def test_head_larger_than_file(self, tmpdir):
+        f = tmpdir / "small.txt"
+        f.write_text("x\ny\nz")
+        allowed = resolve_allowed_directories([str(tmpdir)])
+        result = run(read_file_with_line_numbers(str(f), allowed, head=100))
+        assert result == "1: x\n2: y\n3: z"
+
+    def test_tail_parameter(self, tmpdir):
+        f = tmpdir / "lines.txt"
+        f.write_text("\n".join(f"line{i}" for i in range(10)))
+        allowed = resolve_allowed_directories([str(tmpdir)])
+        result = run(read_file_with_line_numbers(str(f), allowed, tail=3))
+        assert result == " 8: line7\n 9: line8\n10: line9"
+
+    def test_tail_preserves_original_line_numbers(self, tmpdir):
+        f = tmpdir / "big.txt"
+        f.write_text("\n".join(f"L{i}" for i in range(200)))
+        allowed = resolve_allowed_directories([str(tmpdir)])
+        result = run(read_file_with_line_numbers(str(f), allowed, tail=5))
+        lines = result.split("\n")
+        assert len(lines) == 5
+        assert lines[0] == "196: L195"
+        assert lines[4] == "200: L199"
+
+    def test_tail_larger_than_file(self, tmpdir):
+        f = tmpdir / "small.txt"
+        f.write_text("x\ny\nz")
+        allowed = resolve_allowed_directories([str(tmpdir)])
+        result = run(read_file_with_line_numbers(str(f), allowed, tail=100))
+        assert result == "1: x\n2: y\n3: z"
+
+    def test_tail_zero(self, tmpdir):
+        f = tmpdir / "lines.txt"
+        f.write_text("a\nb\nc\n")
+        allowed = resolve_allowed_directories([str(tmpdir)])
+        result = run(read_file_with_line_numbers(str(f), allowed, tail=0))
+        assert result == ""
+
+    def test_tail_negative(self, tmpdir):
+        f = tmpdir / "lines.txt"
+        f.write_text("a\nb\nc\n")
+        allowed = resolve_allowed_directories([str(tmpdir)])
+        result = run(read_file_with_line_numbers(str(f), allowed, tail=-3))
+        assert result == ""
+
+    def test_head_and_tail_raises(self, tmpdir):
+        f = tmpdir / "x.txt"
+        f.write_text("x")
+        allowed = resolve_allowed_directories([str(tmpdir)])
+        with pytest.raises(ValueError, match="Cannot specify both head and tail"):
+            run(read_file_with_line_numbers(str(f), allowed, head=1, tail=1))
+
+    def test_crlf_handling(self, tmpdir):
+        f = tmpdir / "crlf.txt"
+        f.write_bytes(b"a\r\nb\r\nc\r\n")
+        allowed = resolve_allowed_directories([str(tmpdir)])
+        result = run(read_file_with_line_numbers(str(f), allowed))
+        assert result == "1: a\n2: b\n3: c"
+
+    def test_head_crlf_normalized(self, tmpdir):
+        f = tmpdir / "crlf.txt"
+        f.write_bytes(b"a\r\nb\r\nc\r\n")
+        allowed = resolve_allowed_directories([str(tmpdir)])
+        result = run(read_file_with_line_numbers(str(f), allowed, head=2))
+        assert result == "1: a\n2: b"
+
+    def test_utf8_with_replacement(self, tmpdir):
+        f = tmpdir / "bad_utf8.txt"
+        f.write_bytes(b"good\n\xff\xfe bad\nfine")
+        allowed = resolve_allowed_directories([str(tmpdir)])
+        result = run(read_file_with_line_numbers(str(f), allowed))
+        lines = result.split("\n")
+        assert len(lines) == 3
+        assert lines[0] == "1: good"
+        assert lines[2] == "3: fine"
+
+    def test_binary_ish_file_read_as_text(self, tmpdir):
+        f = tmpdir / "bin.txt"
+        f.write_bytes(b"line1\n\x00null\nline3")
+        allowed = resolve_allowed_directories([str(tmpdir)])
+        result = run(read_file_with_line_numbers(str(f), allowed))
+        lines = result.split("\n")
+        assert len(lines) == 3
+        assert lines[0] == "1: line1"
+        assert lines[2] == "3: line3"
+
+    def test_path_outside_allowed_rejected(self, tmpdir):
+        other = make_tmp()
+        try:
+            f = other / "secret.txt"
+            f.write_text("secret")
+            allowed = resolve_allowed_directories([str(tmpdir)])
+            with pytest.raises(PermissionError):
+                run(read_file_with_line_numbers(str(f), allowed))
+        finally:
+            import shutil
+            shutil.rmtree(other, ignore_errors=True)
+
+    def test_size_limit_enforced(self, tmpdir):
+        f = tmpdir / "big.txt"
+        f.write_text("x")
+        allowed = resolve_allowed_directories([str(tmpdir)])
+        with patch("mcp_filesystem.operations.MAX_FILE_SIZE", 0):
+            with pytest.raises(ValueError, match="File too large"):
+                run(read_file_with_line_numbers(str(f), allowed))
+
+    def test_head_stops_early(self, tmpdir):
+        f = tmpdir / "big.txt"
+        f.write_text("\n".join(str(i) for i in range(1000)))
+        allowed = resolve_allowed_directories([str(tmpdir)])
+        result = run(read_file_with_line_numbers(str(f), allowed, head=3))
+        assert result == "1: 0\n2: 1\n3: 2"
+
+    def test_head_padding_width(self, tmpdir):
+        """head=12 → lines 1-12, width 2."""
+        f = tmpdir / "twelve.txt"
+        f.write_text("\n".join(f"L{i}" for i in range(20)))
+        allowed = resolve_allowed_directories([str(tmpdir)])
+        result = run(read_file_with_line_numbers(str(f), allowed, head=12))
+        lines = result.split("\n")
+        assert lines[0] == " 1: L0"
+        assert lines[8] == " 9: L8"
+        assert lines[11] == "12: L11"
+
+    def test_tail_padding_width(self, tmpdir):
+        """100-line file, tail=5 → lines 96-100, width 3."""
+        f = tmpdir / "hundred.txt"
+        f.write_text("\n".join(f"L{i}" for i in range(100)))
+        allowed = resolve_allowed_directories([str(tmpdir)])
+        result = run(read_file_with_line_numbers(str(f), allowed, tail=5))
+        lines = result.split("\n")
+        assert lines[0] == " 96: L95"
+        assert lines[4] == "100: L99"
+
+    def test_file_with_blank_lines(self, tmpdir):
+        f = tmpdir / "blanks.txt"
+        f.write_text("a\n\nb\n\nc")
+        allowed = resolve_allowed_directories([str(tmpdir)])
+        result = run(read_file_with_line_numbers(str(f), allowed))
+        assert result == "1: a\n2: \n3: b\n4: \n5: c"
+
+    def test_leading_empty_lines(self, tmpdir):
+        """Empty lines at the start of the file must be counted."""
+        f = tmpdir / "leading.txt"
+        f.write_bytes(b"\n\nalpha\nbeta\n")
+        allowed = resolve_allowed_directories([str(tmpdir)])
+        result = run(read_file_with_line_numbers(str(f), allowed))
+        assert result == "1: \n2: \n3: alpha\n4: beta"
+
+    def test_trailing_empty_lines(self, tmpdir):
+        """Empty lines at the end of the file must be counted."""
+        f = tmpdir / "trailing.txt"
+        f.write_bytes(b"alpha\nbeta\n\n\n")
+        allowed = resolve_allowed_directories([str(tmpdir)])
+        result = run(read_file_with_line_numbers(str(f), allowed))
+        assert result == "1: alpha\n2: beta\n3: \n4: "
+
+    def test_leading_and_trailing_empty_lines(self, tmpdir):
+        """Both leading and trailing empty lines must be counted."""
+        f = tmpdir / "both.txt"
+        f.write_bytes(b"\nalpha\n\n")
+        allowed = resolve_allowed_directories([str(tmpdir)])
+        result = run(read_file_with_line_numbers(str(f), allowed))
+        assert result == "1: \n2: alpha\n3: "
+
+    def test_only_newlines(self, tmpdir):
+        """A file containing only newlines should number each empty line."""
+        f = tmpdir / "newlines.txt"
+        f.write_bytes(b"\n\n\n")
+        allowed = resolve_allowed_directories([str(tmpdir)])
+        result = run(read_file_with_line_numbers(str(f), allowed))
+        assert result == "1: \n2: \n3: "
+
+    def test_head_with_leading_empty_lines(self, tmpdir):
+        f = tmpdir / "head_empty.txt"
+        f.write_bytes(b"\n\nalpha\nbeta\n")
+        allowed = resolve_allowed_directories([str(tmpdir)])
+        result = run(read_file_with_line_numbers(str(f), allowed, head=3))
+        assert result == "1: \n2: \n3: alpha"
+
+    def test_tail_with_trailing_empty_lines(self, tmpdir):
+        f = tmpdir / "tail_empty.txt"
+        f.write_bytes(b"alpha\nbeta\n\n\n")
+        allowed = resolve_allowed_directories([str(tmpdir)])
+        result = run(read_file_with_line_numbers(str(f), allowed, tail=3))
+        assert result == "2: beta\n3: \n4: "
+
+    def test_single_trailing_newline_not_trimmed(self, tmpdir):
+        """A file with 'a\\n' has 1 line, not 0 — but 'a\\n\\n' must have 2."""
+        f = tmpdir / "trail.txt"
+        # "alpha\n\n" → 2 lines: "alpha" and ""
+        f.write_bytes(b"alpha\n\n")
+        allowed = resolve_allowed_directories([str(tmpdir)])
+        result = run(read_file_with_line_numbers(str(f), allowed))
+        assert result == "1: alpha\n2: "
+
+    def test_crlf_and_lf_produce_same_output(self, tmpdir):
+        """Windows (\\r\\n) and Unix (\\n) line endings yield identical results."""
+        lf_file = tmpdir / "unix.txt"
+        crlf_file = tmpdir / "win.txt"
+        lf_file.write_bytes(b"alpha\nbeta\n\ngamma\n")
+        crlf_file.write_bytes(b"alpha\r\nbeta\r\n\r\ngamma\r\n")
+        allowed = resolve_allowed_directories([str(tmpdir)])
+        lf_result = run(read_file_with_line_numbers(str(lf_file), allowed))
+        crlf_result = run(read_file_with_line_numbers(str(crlf_file), allowed))
+        assert lf_result == crlf_result
+
+    def test_crlf_and_lf_head_produce_same_output(self, tmpdir):
+        """head parameter: CRLF and LF yield identical results."""
+        lf_file = tmpdir / "unix.txt"
+        crlf_file = tmpdir / "win.txt"
+        lf_file.write_bytes(b"\nalpha\nbeta\ngamma\n")
+        crlf_file.write_bytes(b"\r\nalpha\r\nbeta\r\ngamma\r\n")
+        allowed = resolve_allowed_directories([str(tmpdir)])
+        lf_result = run(read_file_with_line_numbers(str(lf_file), allowed, head=3))
+        crlf_result = run(read_file_with_line_numbers(str(crlf_file), allowed, head=3))
+        assert lf_result == crlf_result
+
+    def test_crlf_and_lf_tail_produce_same_output(self, tmpdir):
+        """tail parameter: CRLF and LF yield identical results."""
+        lf_file = tmpdir / "unix.txt"
+        crlf_file = tmpdir / "win.txt"
+        lf_file.write_bytes(b"alpha\nbeta\n\ngamma\n")
+        crlf_file.write_bytes(b"alpha\r\nbeta\r\n\r\ngamma\r\n")
+        allowed = resolve_allowed_directories([str(tmpdir)])
+        lf_result = run(read_file_with_line_numbers(str(lf_file), allowed, tail=2))
+        crlf_result = run(read_file_with_line_numbers(str(crlf_file), allowed, tail=2))
+        assert lf_result == crlf_result
+
+    def test_mixed_line_endings(self, tmpdir):
+        """A file mixing \\n, \\r\\n, and bare \\r splits correctly."""
+        f = tmpdir / "mixed.txt"
+        f.write_bytes(b"alpha\nbeta\r\ngamma\rdelta")
+        allowed = resolve_allowed_directories([str(tmpdir)])
+        result = run(read_file_with_line_numbers(str(f), allowed))
+        assert result == "1: alpha\n2: beta\n3: gamma\n4: delta"
+
+    def test_no_carriage_return_in_output(self, tmpdir):
+        """Output must never contain \\r regardless of input line endings."""
+        f = tmpdir / "cr.txt"
+        f.write_bytes(b"one\r\ntwo\rthree\n")
+        allowed = resolve_allowed_directories([str(tmpdir)])
+        result = run(read_file_with_line_numbers(str(f), allowed))
+        assert "\r" not in result
+
+    def test_no_carriage_return_in_head_output(self, tmpdir):
+        f = tmpdir / "cr.txt"
+        f.write_bytes(b"one\r\ntwo\rthree\r\n")
+        allowed = resolve_allowed_directories([str(tmpdir)])
+        result = run(read_file_with_line_numbers(str(f), allowed, head=2))
+        assert "\r" not in result
+
+    def test_bare_cr_head(self, tmpdir):
+        """head on a file using bare \\r line endings."""
+        f = tmpdir / "cr_only.txt"
+        f.write_bytes(b"alpha\rbeta\rgamma\rdelta")
+        allowed = resolve_allowed_directories([str(tmpdir)])
+        result = run(read_file_with_line_numbers(str(f), allowed, head=2))
+        assert result == "1: alpha\n2: beta"
+
+    def test_bare_cr_tail(self, tmpdir):
+        """tail on a file using bare \\r line endings."""
+        f = tmpdir / "cr_only.txt"
+        f.write_bytes(b"alpha\rbeta\rgamma\rdelta")
+        allowed = resolve_allowed_directories([str(tmpdir)])
+        result = run(read_file_with_line_numbers(str(f), allowed, tail=2))
+        assert result == "3: gamma\n4: delta"
 
 
 # ---------------------------------------------------------------------------

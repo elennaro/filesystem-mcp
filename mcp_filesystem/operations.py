@@ -26,9 +26,10 @@ import json
 import os
 import re
 import tempfile
+from collections import deque
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Sequence
+from typing import Iterator, Sequence
 
 from mcp_filesystem.security import validate_path, validate_path_for_creation
 
@@ -344,6 +345,130 @@ async def read_text_file(
     if tail is not None:
         return "\n".join(text.splitlines()[-tail:])
     return text
+
+
+def _iter_lines(f) -> Iterator[str]:
+    """Yield logical lines from a text-mode file handle.
+
+    Matches ``str.splitlines()`` semantics: ``\\n``, ``\\r\\n``, and bare
+    ``\\r`` are all treated as line separators.  On Windows, text-mode I/O
+    already translates ``\\r\\n`` → ``\\n``; this function additionally
+    splits on bare ``\\r`` so the result agrees with ``splitlines()``
+    regardless of platform.
+    """
+    for raw_line in f:
+        # Strip the iterator's line terminator (\n), if present.
+        if raw_line.endswith("\n"):
+            raw_line = raw_line[:-1]
+        # Strip one trailing \r — either the \r from \r\n on non-Windows,
+        # or a bare \r line terminator.
+        if raw_line.endswith("\r"):
+            raw_line = raw_line[:-1]
+        # Any remaining \r chars are bare-CR line separators within the line.
+        yield from raw_line.split("\r")
+
+
+def _format_numbered_lines(lines: list[str], start: int) -> str:
+    """Format *lines* with right-aligned, 1-based line numbers.
+
+    ``start`` is the 1-based number of the first line.  Numbers are
+    right-aligned (left-padded with spaces) to the width of the largest
+    number in the output.  Returns ``""`` when *lines* is empty.
+    """
+    if not lines:
+        return ""
+    last = start + len(lines) - 1
+    width = len(str(last))
+    return "\n".join([
+        f"{str(start + i).rjust(width)}: {content}"
+        for i, content in enumerate(lines)
+    ])
+
+
+async def read_file_with_line_numbers(
+    path: str,
+    allowed: Sequence[Path],
+    *,
+    head: int | None = None,
+    tail: int | None = None,
+) -> str:
+    """
+    Read a text file and return its contents with 1-based line numbers.
+
+    Each line is formatted as ``{number}: {content}`` where ``number`` is
+    right-aligned with spaces to the width of the largest line number in
+    the output.  For ``tail``, line numbers reflect the original file
+    position (not reset to 1).
+
+    All three code-paths stream the file line-by-line via ``_iter_lines``
+    so the raw file text and the split line list are never held in memory
+    simultaneously:
+
+    * **head** — single-pass, early stop: O(head) time and memory.
+    * **tail** — single-pass with a bounded ``deque(maxlen=tail)`` so at
+      most *tail* lines are kept; the total line count is tracked for
+      correct numbering.
+    * **full read** — single-pass into a list, then formatted.
+
+    Uses the same encoding, size-limit, and security checks as
+    ``read_text_file``.
+    """
+    if head is not None and tail is not None:
+        raise ValueError(
+            "Cannot specify both head and tail parameters simultaneously. "
+            "Use head to read from the start or tail to read from the end, "
+            "not both."
+        )
+    try:
+        valid = await validate_path(path, allowed)
+    except PermissionError:
+        raise PermissionError(
+            f"Access denied: {path} is outside the allowed directories. "
+            "Call list_allowed_directories to see which paths are accessible."
+        )
+    except FileNotFoundError:
+        raise FileNotFoundError(
+            f"File not found: {path} — verify the path exists with "
+            "list_directory or search_files."
+        )
+
+    try:
+        _check_size(valid)
+    except OSError:
+        raise FileNotFoundError(
+            f"File not found: {path} — verify the path exists with "
+            "list_directory or search_files."
+        )
+
+    # -- head: single-pass, early stop ---------------------------------
+    if head is not None:
+        if head <= 0:
+            return ""
+        lines: list[str] = []
+        with valid.open(encoding="utf-8", errors="replace") as f:
+            for line in _iter_lines(f):
+                lines.append(line)
+                if len(lines) >= head:
+                    break
+        return _format_numbered_lines(lines, start=1)
+
+    # -- tail: single-pass, bounded deque ------------------------------
+    if tail is not None:
+        if tail <= 0:
+            return ""
+        total = 0
+        last_n: deque[str] = deque(maxlen=tail)
+        with valid.open(encoding="utf-8", errors="replace") as f:
+            for line in _iter_lines(f):
+                total += 1
+                last_n.append(line)
+        start = total - len(last_n) + 1
+        return _format_numbered_lines(list(last_n), start=start)
+
+    # -- full read: single-pass, stream into list ----------------------
+    with valid.open(encoding="utf-8", errors="replace") as f:
+        all_lines = list(_iter_lines(f))
+    return _format_numbered_lines(all_lines, start=1)
 
 
 async def read_multiple_files(paths: list[str], allowed: Sequence[Path]) -> str:

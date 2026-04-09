@@ -27,6 +27,7 @@ from mcp_filesystem.operations import (
     directory_tree,
     edit_file,
     grep_files,
+    read_file_with_line_numbers,
     read_media_file,
     read_text_file,
     search_files,
@@ -57,6 +58,9 @@ BUDGET_TREE_200   = 3.0   # directory_tree on a 200-entry flat tree
 BUDGET_SEARCH_200 = 3.0   # search_files on a 200-entry flat tree
 BUDGET_MEDIA_1MB  = 2.0   # read_media_file on a 1 MB binary file
 BUDGET_GREP_200   = 5.0   # grep_files on 200 files × 50 lines with context_lines=2
+BUDGET_READ_NUMBERED_1MB  = 0.15  # read_file_with_line_numbers on a 1 MB file
+BUDGET_HEAD_ON_10MB       = 0.5   # head=10 on a 10 MB file (must be O(head))
+BUDGET_TAIL_ON_5MB        = 0.25  # tail=10 on a 5 MB file
 
 
 # ---------------------------------------------------------------------------
@@ -80,6 +84,56 @@ class TestReadTextFilePerf:
         elapsed = _elapsed(read_text_file(str(f), allowed, head=100))
         assert elapsed < BUDGET_READ_1MB, (
             f"read_text_file head=100 on 1 MB took {elapsed:.3f}s — budget {BUDGET_READ_1MB}s"
+        )
+
+
+# ---------------------------------------------------------------------------
+# read_file_with_line_numbers
+# ---------------------------------------------------------------------------
+
+class TestReadFileWithLineNumbersPerf:
+    def test_read_numbered_1mb_within_budget(self, tmpdir):
+        f = tmpdir / "big.txt"
+        f.write_text("\n".join(f"line content number {i:05d} pad" for i in range(20000)))
+        allowed = resolve_allowed_directories([str(tmpdir)])
+        elapsed = _elapsed(read_file_with_line_numbers(str(f), allowed))
+        assert elapsed < BUDGET_READ_NUMBERED_1MB, (
+            f"read_file_with_line_numbers 1 MB took {elapsed:.3f}s "
+            f"— budget {BUDGET_READ_NUMBERED_1MB}s"
+        )
+
+    def test_read_numbered_head_1mb_within_budget(self, tmpdir):
+        f = tmpdir / "big.txt"
+        f.write_bytes(b"line\n" * 200_000)  # ~1 MB
+        allowed = resolve_allowed_directories([str(tmpdir)])
+        elapsed = _elapsed(read_file_with_line_numbers(str(f), allowed, head=100))
+        assert elapsed < BUDGET_READ_NUMBERED_1MB, (
+            f"read_file_with_line_numbers head=100 on 1 MB took {elapsed:.3f}s "
+            f"— budget {BUDGET_READ_NUMBERED_1MB}s"
+        )
+
+    def test_head_on_10mb_is_sublinear(self, tmpdir):
+        """head=10 on a 10 MB file must be fast — proves O(head) not O(file)."""
+        f = tmpdir / "huge.txt"
+        f.write_bytes(
+            (b"this is a line of content that is about eighty characters long "
+             b"to make it real\n") * 125_000  # ~10 MB
+        )
+        allowed = resolve_allowed_directories([str(tmpdir)])
+        elapsed = _elapsed(read_file_with_line_numbers(str(f), allowed, head=10))
+        assert elapsed < BUDGET_HEAD_ON_10MB, (
+            f"read_file_with_line_numbers head=10 on 10 MB took {elapsed:.3f}s "
+            f"— budget {BUDGET_HEAD_ON_10MB}s"
+        )
+
+    def test_tail_on_5mb_within_budget(self, tmpdir):
+        f = tmpdir / "big.txt"
+        f.write_text("\n".join(f"line content {i:06d} pad" for i in range(100_000)))
+        allowed = resolve_allowed_directories([str(tmpdir)])
+        elapsed = _elapsed(read_file_with_line_numbers(str(f), allowed, tail=10))
+        assert elapsed < BUDGET_TAIL_ON_5MB, (
+            f"read_file_with_line_numbers tail=10 on 5 MB took {elapsed:.3f}s "
+            f"— budget {BUDGET_TAIL_ON_5MB}s"
         )
 
 

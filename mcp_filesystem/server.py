@@ -1,7 +1,7 @@
 """
 MCP server for filesystem access.
 
-Registers 13 tools that mirror the Official MCP TypeScript filesystem server
+Registers 15 tools that mirror the Official MCP TypeScript filesystem server
 API exactly (except read_media_file, which is excluded from this build).
 
 Tool names, parameter names, descriptions, and error message strings all match
@@ -34,6 +34,7 @@ from mcp_filesystem.operations import (
     list_directory,
     list_directory_with_sizes,
     move_file,
+    read_file_with_line_numbers,
     read_media_file,
     read_multiple_files,
     read_text_file,
@@ -101,6 +102,42 @@ def create_server(allowed_dirs: list[str]) -> FastMCP:
         tail: Optional[int] = None,
     ) -> str:
         return await read_text_file(path, allowed, head=head, tail=tail)
+
+    # -----------------------------------------------------------------------
+    # read_file_with_line_numbers
+    # -----------------------------------------------------------------------
+
+    @mcp.tool(
+        name="read_file_with_line_numbers",
+        description=(
+            "Read a text file with 1-based line numbers prepended to each "
+            "line. Useful when you need to reference specific line numbers "
+            "for editing, debugging, or code review — prefer this over "
+            "read_text_file when line positions matter.\n\n"
+            "Output format: '{number}: {content}' — numbers are right-"
+            "aligned for readability. Example for a 12-line file:\n"
+            "  ' 1: first line\\n 2: second line\\n...\\n12: last line'\n\n"
+            "Parameters:\n"
+            "- path: absolute path to the file (must be within allowed "
+            "directories)\n"
+            "- head: return only the first N lines (efficient: does not "
+            "read the entire file)\n"
+            "- tail: return only the last N lines (line numbers reflect "
+            "original file positions, not reset to 1)\n"
+            "- head and tail cannot be used together\n"
+            "- head=0 or tail=0 returns an empty string\n\n"
+            "Reads as UTF-8 (with replacement for invalid bytes). "
+            "Maximum file size: 50 MB. Empty files return an empty string."
+        ),
+    )
+    async def _read_file_with_line_numbers(
+        path: str,
+        head: Optional[int] = None,
+        tail: Optional[int] = None,
+    ) -> str:
+        return await read_file_with_line_numbers(
+            path, allowed, head=head, tail=tail,
+        )
 
     # -----------------------------------------------------------------------
     # read_media_file
